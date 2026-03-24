@@ -1,0 +1,21 @@
+{
+  "name": "lifebot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Lifebot MVP 1 desktop aquatics operations assistant",
+  "workspaces": [
+    "apps/*",
+    "packages/shared-types"
+  ],
+  "scripts": {
+    "dev": "bash scripts/dev/desktop.sh",
+    "dev:web": "bash scripts/dev/web.sh",
+    "build": "npm run desktop:build --workspace apps/desktop",
+    "build:web": "npm run frontend:build --workspace apps/desktop && cargo build -p lifebot-web-server --release",
+    "serve": "cargo run -p lifebot-web-server",
+    "lint": "npm run check --workspace apps/desktop",
+    "test": "cargo test -p lifebot-core -p lifebot-policies -p lifebot-assistant-tools -p lifebot-sling-mock -p lifebot-messaging -p lifebot-openclaw-adapter && npm run test --workspace apps/desktop",
+    "tauri": "npm run tauri --workspace apps/desktop --",
+    "seed:demo": "bash scripts/seed/demo.sh"
+  }
+}

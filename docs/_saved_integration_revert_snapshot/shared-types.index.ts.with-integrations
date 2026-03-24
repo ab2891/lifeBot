@@ -1,0 +1,118 @@
+export type GuardCertificationStatus = {
+  certification: string;
+  expires_on: string;
+  status: string;
+};
+
+export type GuardProfile = {
+  id: string;
+  name: string;
+  date_of_birth: string;
+  age: number;
+  phone: string;
+  email: string;
+  active: boolean;
+  notes: string;
+  preferred_shifts: string;
+  roles: string[];
+  certifications: GuardCertificationStatus[];
+};
+
+export type ShiftAssignmentView = {
+  shift_id: string;
+  template_name: string;
+  cycle_name: string;
+  site_name: string;
+  pool_name: string;
+  role_name: string;
+  day_name: string;
+  start_time: string;
+  end_time: string;
+  assigned_guard_name?: string | null;
+  assignment_status: string;
+  incumbent_guard_name?: string | null;
+  rollover_deadline: string;
+};
+
+export type ShiftQueueEntry = {
+  request_id: string;
+  shift_id: string;
+  template_name: string;
+  requester_name: string;
+  requested_at: string;
+  status: string;
+  reason?: string | null;
+};
+
+export type PolicyViolationView = {
+  shift_id: string;
+  guard_name: string;
+  template_name: string;
+  violation: string;
+  reason: string;
+};
+
+export type CertificationExpiryView = {
+  guard_name: string;
+  certification: string;
+  expires_on: string;
+  days_remaining: number;
+};
+
+export type DecisionTraceSummary = {
+  id: string;
+  shift_id: string;
+  summary: string;
+  decision_type: string;
+  decided_at: string;
+};
+
+export type DecisionTraceDetail = DecisionTraceSummary & {
+  payload: unknown;
+};
+
+export type DashboardData = {
+  demo_mode: boolean;
+  admin_mode: boolean;
+  current_cycle_name: string;
+  next_cycle_name: string;
+  active_guards: number;
+  open_shift_count: number;
+  pending_request_count: number;
+  expiring_cert_count: number;
+  draft_status: string;
+  recent_decisions: DecisionTraceSummary[];
+};
+
+export type AssistantResponse = {
+  tool: string;
+  title: string;
+  explanation: string;
+  data: unknown;
+};
+
+export type SlingIntegrationSettings = {
+  provider_mode: string;
+  configured: boolean;
+  api_key_present: boolean;
+  workspace_id: string;
+  base_url: string;
+  auto_import_enabled: boolean;
+  status: string;
+  status_message: string;
+};
+
+export type OpenClawIntegrationSettings = {
+  adapter_mode: string;
+  installed: boolean;
+  enabled: boolean;
+  endpoint: string;
+  auto_launch_enabled: boolean;
+  status: string;
+  status_message: string;
+};
+
+export type IntegrationSettings = {
+  sling: SlingIntegrationSettings;
+  openclaw: OpenClawIntegrationSettings;
+};

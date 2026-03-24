@@ -1,0 +1,81 @@
+import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import type {
+  AssistantResponse,
+  CertificationExpiryView,
+  DashboardData,
+  DecisionTraceDetail,
+  DecisionTraceSummary,
+  GuardProfile,
+  IntegrationSettings,
+  PolicyViolationView,
+  ShiftAssignmentView,
+  ShiftQueueEntry
+} from "@lifebot/shared-types";
+
+function safeInvoke<T>(command: string, payload?: Record<string, unknown>): Promise<T> {
+  const hasBridge =
+    typeof window !== "undefined" &&
+    typeof (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ !== "undefined";
+
+  if (!hasBridge) {
+    throw new Error(
+      "Lifebot UI loaded without the Tauri desktop bridge. The localhost page is only a development frontend server. Please launch Lifebot through the desktop app, not a regular browser tab."
+    );
+  }
+
+  return tauriInvoke(command, payload) as Promise<T>;
+}
+
+export const api = {
+  bootstrap: () => safeInvoke<void>("bootstrap_app"),
+  dashboard: () => safeInvoke<DashboardData>("get_dashboard"),
+  guards: () => safeInvoke<GuardProfile[]>("list_guard_profiles"),
+  shifts: () => safeInvoke<ShiftAssignmentView[]>("list_schedule_view"),
+  queue: () => safeInvoke<ShiftQueueEntry[]>("list_request_queue"),
+  violations: () => safeInvoke<PolicyViolationView[]>("list_policy_violations"),
+  expirations: () => safeInvoke<CertificationExpiryView[]>("list_cert_expirations"),
+  generateDraft: () => safeInvoke<DecisionTraceSummary[]>("generate_next_cycle_draft"),
+  approveDraft: () => safeInvoke<void>("approve_draft_schedule"),
+  traces: () => safeInvoke<DecisionTraceSummary[]>("list_decision_traces"),
+  traceDetail: (traceId: string) =>
+    safeInvoke<DecisionTraceDetail | null>("get_decision_trace_detail", {
+      traceId: traceId,
+      trace_id: traceId
+    }),
+  examples: () => safeInvoke<string[]>("get_assistant_examples"),
+  integrations: () => safeInvoke<IntegrationSettings>("get_integration_settings"),
+  saveSlingSettings: (payload: {
+    apiKey: string;
+    workspaceId: string;
+    baseUrl: string;
+    autoImportEnabled: boolean;
+  }) =>
+    safeInvoke<IntegrationSettings>("save_sling_settings", {
+      apiKey: payload.apiKey,
+      api_key: payload.apiKey,
+      workspaceId: payload.workspaceId,
+      workspace_id: payload.workspaceId,
+      baseUrl: payload.baseUrl,
+      base_url: payload.baseUrl,
+      autoImportEnabled: payload.autoImportEnabled,
+      auto_import_enabled: payload.autoImportEnabled
+    }),
+  testSlingSettings: () => safeInvoke<IntegrationSettings>("test_sling_settings"),
+  installOpenClawAdapter: () =>
+    safeInvoke<IntegrationSettings>("install_openclaw_adapter"),
+  saveOpenClawSettings: (payload: {
+    endpoint: string;
+    enabled: boolean;
+    autoLaunchEnabled: boolean;
+  }) =>
+    safeInvoke<IntegrationSettings>("save_openclaw_settings", {
+      endpoint: payload.endpoint,
+      enabled: payload.enabled,
+      autoLaunchEnabled: payload.autoLaunchEnabled,
+      auto_launch_enabled: payload.autoLaunchEnabled
+    }),
+  testOpenClawSettings: () =>
+    safeInvoke<IntegrationSettings>("test_openclaw_settings"),
+  assistantQuery: (query: string) =>
+    safeInvoke<AssistantResponse>("run_assistant_query", { query })
+};

@@ -1,0 +1,10 @@
+node_modules
+dist
+.svelte-kit
+target
+*.db
+*.db-shm
+*.db-wal
+.DS_Store
+.env
+apps/desktop/src-tauri/gen

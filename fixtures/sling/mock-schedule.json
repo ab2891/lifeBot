@@ -1,0 +1,30 @@
+{
+  "provider": "sling-mock",
+  "sites": [
+    {
+      "id": "site-main",
+      "name": "Downtown YMCA"
+    },
+    {
+      "id": "site-north",
+      "name": "Northside YMCA"
+    }
+  ],
+  "pools": [
+    {
+      "id": "pool-main-competition",
+      "siteId": "site-main",
+      "name": "Main Pool"
+    },
+    {
+      "id": "pool-main-rec",
+      "siteId": "site-main",
+      "name": "Rec Pool"
+    },
+    {
+      "id": "pool-north",
+      "siteId": "site-north",
+      "name": "Northside Pool"
+    }
+  ]
+}

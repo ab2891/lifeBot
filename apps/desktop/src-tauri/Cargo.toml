@@ -1,0 +1,25 @@
+[package]
+name = "lifebot-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "lifebot_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.0.0", features = [] }
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tauri = { version = "2.0.0", features = [] }
+lifebot-core = { path = "../../../crates/core" }
+lifebot-assistant-tools = { path = "../../../packages/assistant-tools" }
+lifebot-openclaw-adapter = { path = "../../../packages/openclaw-adapter" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+webkit2gtk = { version = "2.0.2", features = ["v2_16"] }
+

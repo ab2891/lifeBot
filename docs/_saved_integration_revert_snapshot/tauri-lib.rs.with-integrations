@@ -1,0 +1,195 @@
+use std::sync::Mutex;
+
+use lifebot_core::LifebotService;
+
+#[derive(Default)]
+pub struct AppState {
+    service: Mutex<Option<LifebotService>>,
+}
+
+mod commands {
+    use std::env;
+
+    use lifebot_assistant_tools::AssistantTools;
+    use serde::Serialize;
+    use tauri::{Manager, State};
+
+    use crate::AppState;
+    use lifebot_core::LifebotService;
+
+    fn with_service<R>(
+        state: &State<AppState>,
+        f: impl FnOnce(&LifebotService) -> anyhow::Result<R>,
+    ) -> Result<R, String> {
+        let guard = state
+            .service
+            .lock()
+            .map_err(|_| "Unable to lock app state".to_string())?;
+        let service = guard
+            .as_ref()
+            .ok_or_else(|| "Lifebot service is not initialized".to_string())?;
+        f(service).map_err(|err| err.to_string())
+    }
+
+    #[tauri::command]
+    pub fn bootstrap_app(app: tauri::AppHandle, state: State<AppState>) -> Result<(), String> {
+        let base_dir = app
+            .path()
+            .app_local_data_dir()
+            .map_err(|err| err.to_string())?;
+        std::fs::create_dir_all(&base_dir).map_err(|err| err.to_string())?;
+        env::set_var("LIFEBOT_DB_PATH", base_dir.join("lifebot-demo.db"));
+        let service = LifebotService::from_env(base_dir);
+        service.init().map_err(|err| err.to_string())?;
+        *state
+            .service
+            .lock()
+            .map_err(|_| "Unable to store app state".to_string())? = Some(service);
+        Ok(())
+    }
+
+    #[tauri::command]
+    pub fn get_dashboard(state: State<AppState>) -> Result<impl Serialize, String> {
+        with_service(&state, |service| service.dashboard())
+    }
+
+    #[tauri::command]
+    pub fn list_guard_profiles(state: State<AppState>) -> Result<impl Serialize, String> {
+        with_service(&state, |service| service.guard_profiles())
+    }
+
+    #[tauri::command]
+    pub fn list_schedule_view(state: State<AppState>) -> Result<impl Serialize, String> {
+        with_service(&state, |service| service.schedule_view())
+    }
+
+    #[tauri::command]
+    pub fn list_request_queue(state: State<AppState>) -> Result<impl Serialize, String> {
+        with_service(&state, |service| service.request_queue())
+    }
+
+    #[tauri::command]
+    pub fn list_policy_violations(state: State<AppState>) -> Result<impl Serialize, String> {
+        with_service(&state, |service| service.policy_violations())
+    }
+
+    #[tauri::command]
+    pub fn list_cert_expirations(state: State<AppState>) -> Result<impl Serialize, String> {
+        with_service(&state, |service| service.certification_expirations())
+    }
+
+    #[tauri::command]
+    pub fn generate_next_cycle_draft(state: State<AppState>) -> Result<impl Serialize, String> {
+        with_service(&state, |service| service.generate_draft())
+    }
+
+    #[tauri::command]
+    pub fn approve_draft_schedule(state: State<AppState>) -> Result<(), String> {
+        with_service(&state, |service| service.approve_draft_schedule())
+    }
+
+    #[tauri::command]
+    pub fn list_decision_traces(state: State<AppState>) -> Result<impl Serialize, String> {
+        with_service(&state, |service| service.decision_traces())
+    }
+
+    #[tauri::command]
+    pub fn get_decision_trace_detail(
+        trace_id: String,
+        state: State<AppState>,
+    ) -> Result<impl Serialize, String> {
+        with_service(&state, |service| service.decision_trace_detail(&trace_id))
+    }
+
+    #[tauri::command]
+    pub fn get_assistant_examples(state: State<AppState>) -> Result<impl Serialize, String> {
+        with_service(&state, |service| Ok(service.assistant_examples()))
+    }
+
+    #[tauri::command]
+    pub fn get_integration_settings(state: State<AppState>) -> Result<impl Serialize, String> {
+        with_service(&state, |service| service.integration_settings())
+    }
+
+    #[tauri::command]
+    pub fn save_sling_settings(
+        api_key: String,
+        workspace_id: String,
+        base_url: String,
+        auto_import_enabled: bool,
+        state: State<AppState>,
+    ) -> Result<impl Serialize, String> {
+        with_service(&state, |service| {
+            service.save_sling_settings(api_key, workspace_id, base_url, auto_import_enabled)
+        })
+    }
+
+    #[tauri::command]
+    pub fn test_sling_settings(state: State<AppState>) -> Result<impl Serialize, String> {
+        with_service(&state, |service| service.test_sling_settings())
+    }
+
+    #[tauri::command]
+    pub fn install_openclaw_adapter(state: State<AppState>) -> Result<impl Serialize, String> {
+        with_service(&state, |service| service.install_openclaw_adapter())
+    }
+
+    #[tauri::command]
+    pub fn save_openclaw_settings(
+        endpoint: String,
+        enabled: bool,
+        auto_launch_enabled: bool,
+        state: State<AppState>,
+    ) -> Result<impl Serialize, String> {
+        with_service(&state, |service| {
+            service.save_openclaw_settings(endpoint, enabled, auto_launch_enabled)
+        })
+    }
+
+    #[tauri::command]
+    pub fn test_openclaw_settings(state: State<AppState>) -> Result<impl Serialize, String> {
+        with_service(&state, |service| service.test_openclaw_settings())
+    }
+
+    #[tauri::command]
+    pub fn run_assistant_query(
+        query: String,
+        state: State<AppState>,
+    ) -> Result<impl Serialize, String> {
+        with_service(&state, |service| {
+            let tools = AssistantTools::new(service.clone());
+            if query.to_lowercase().contains("approve") {
+                tools.approve_draft_schedule()?;
+            }
+            service.run_assistant_query(&query)
+        })
+    }
+}
+
+pub fn run() {
+    tauri::Builder::default()
+        .manage(AppState::default())
+        .invoke_handler(tauri::generate_handler![
+            commands::bootstrap_app,
+            commands::get_dashboard,
+            commands::list_guard_profiles,
+            commands::list_schedule_view,
+            commands::list_request_queue,
+            commands::list_policy_violations,
+            commands::list_cert_expirations,
+            commands::generate_next_cycle_draft,
+            commands::approve_draft_schedule,
+            commands::list_decision_traces,
+            commands::get_decision_trace_detail,
+            commands::get_assistant_examples,
+            commands::get_integration_settings,
+            commands::save_sling_settings,
+            commands::test_sling_settings,
+            commands::install_openclaw_adapter,
+            commands::save_openclaw_settings,
+            commands::test_openclaw_settings,
+            commands::run_assistant_query
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running Lifebot desktop");
+}

@@ -1,0 +1,28 @@
+[workspace]
+members = [
+  "apps/desktop/src-tauri",
+  "apps/web-server",
+  "crates/core",
+  "packages/policies",
+  "packages/providers/sling-mock",
+  "packages/providers/messaging",
+  "packages/assistant-tools",
+  "packages/openclaw-adapter"
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+version = "0.1.0"
+
+[workspace.dependencies]
+anyhow = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+rusqlite = { version = "0.32", features = ["bundled", "chrono", "serde_json"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+uuid = { version = "1.8", features = ["v4", "serde"] }
+reqwest = { version = "0.12", features = ["json"] }
+tokio = { version = "1.0", features = ["rt", "macros"] }

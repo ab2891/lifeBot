@@ -1,0 +1,807 @@
+<script lang="ts">
+  import { onMount } from "svelte";
+  import { api } from "./lib/api";
+  import type {
+    AssistantResponse,
+    CertificationExpiryView,
+    DashboardData,
+    DecisionTraceDetail,
+    DecisionTraceSummary,
+    GuardProfile,
+    IntegrationSettings,
+    PolicyViolationView,
+    ShiftAssignmentView,
+    ShiftQueueEntry
+  } from "@lifebot/shared-types";
+
+  type Tab =
+    | "dashboard"
+    | "guards"
+    | "schedule"
+    | "queue"
+    | "violations"
+    | "certs"
+    | "draft"
+    | "assistant"
+    | "integrations";
+
+  const tabs: { id: Tab; label: string }[] = [
+    { id: "dashboard", label: "Dashboard" },
+    { id: "guards", label: "Guard profiles" },
+    { id: "schedule", label: "Schedule" },
+    { id: "queue", label: "Request queue" },
+    { id: "violations", label: "Policy issues" },
+    { id: "certs", label: "Certifications" },
+    { id: "draft", label: "Draft generator" },
+    { id: "assistant", label: "Assistant" },
+    { id: "integrations", label: "Integrations" }
+  ];
+
+  let activeTab: Tab = "dashboard";
+  let loading = true;
+  let busy = false;
+  let dashboard: DashboardData | null = null;
+  let guards: GuardProfile[] = [];
+  let shifts: ShiftAssignmentView[] = [];
+  let queue: ShiftQueueEntry[] = [];
+  let violations: PolicyViolationView[] = [];
+  let expirations: CertificationExpiryView[] = [];
+  let traces: DecisionTraceSummary[] = [];
+  let selectedTrace: DecisionTraceDetail | null = null;
+  let assistantExamples: string[] = [];
+  let assistantQuery = "";
+  let assistantResponse: AssistantResponse | null = null;
+  let integrations: IntegrationSettings | null = null;
+  let slingApiKey = "";
+  let slingWorkspaceId = "";
+  let slingBaseUrl = "https://api.sling.is";
+  let slingAutoImportEnabled = false;
+  let openClawEndpoint = "http://127.0.0.1:7331";
+  let openClawEnabled = false;
+  let openClawAutoLaunchEnabled = false;
+  let integrationNotice = "";
+  let error = "";
+
+  function syncIntegrationForms() {
+    if (!integrations) return;
+    slingWorkspaceId = integrations.sling.workspace_id;
+    slingBaseUrl = integrations.sling.base_url;
+    slingAutoImportEnabled = integrations.sling.auto_import_enabled;
+    openClawEndpoint = integrations.openclaw.endpoint;
+    openClawEnabled = integrations.openclaw.enabled;
+    openClawAutoLaunchEnabled = integrations.openclaw.auto_launch_enabled;
+    slingApiKey = "";
+  }
+
+  async function refreshData() {
+    [
+      dashboard,
+      guards,
+      shifts,
+      queue,
+      violations,
+      expirations,
+      traces,
+      assistantExamples,
+      integrations
+    ] = await Promise.all([
+      api.dashboard(),
+      api.guards(),
+      api.shifts(),
+      api.queue(),
+      api.violations(),
+      api.expirations(),
+      api.traces(),
+      api.examples(),
+      api.integrations()
+    ]);
+    selectedTrace = traces[0] ? await api.traceDetail(traces[0].id) : null;
+    syncIntegrationForms();
+  }
+
+  async function loadAll() {
+    loading = true;
+    error = "";
+    try {
+      await api.bootstrap();
+      await refreshData();
+    } catch (err) {
+      error = err instanceof Error ? err.message : "Unable to load Lifebot demo data.";
+    } finally {
+      loading = false;
+    }
+  }
+
+  async function generateDraft() {
+    busy = true;
+    try {
+      traces = await api.generateDraft();
+      await refreshData();
+      if (traces[0]) {
+        selectedTrace = await api.traceDetail(traces[0].id);
+      }
+      activeTab = "draft";
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function approveDraft() {
+    busy = true;
+    try {
+      await api.approveDraft();
+      await refreshData();
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function showTrace(traceId: string) {
+    selectedTrace = await api.traceDetail(traceId);
+  }
+
+  async function runAssistant() {
+    if (!assistantQuery.trim()) return;
+    busy = true;
+    try {
+      assistantResponse = await api.assistantQuery(assistantQuery);
+      await refreshData();
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function saveSlingSettings() {
+    busy = true;
+    try {
+      integrations = await api.saveSlingSettings({
+        apiKey: slingApiKey,
+        workspaceId: slingWorkspaceId,
+        baseUrl: slingBaseUrl,
+        autoImportEnabled: slingAutoImportEnabled
+      });
+      integrationNotice = "Sling settings saved inside Lifebot.";
+      syncIntegrationForms();
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function testSlingSettings() {
+    busy = true;
+    try {
+      integrations = await api.testSlingSettings();
+      integrationNotice = integrations.sling.status_message;
+      syncIntegrationForms();
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function installOpenClawAdapter() {
+    busy = true;
+    try {
+      integrations = await api.installOpenClawAdapter();
+      integrationNotice = integrations.openclaw.status_message;
+      syncIntegrationForms();
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function saveOpenClawSettings() {
+    busy = true;
+    try {
+      integrations = await api.saveOpenClawSettings({
+        endpoint: openClawEndpoint,
+        enabled: openClawEnabled,
+        autoLaunchEnabled: openClawAutoLaunchEnabled
+      });
+      integrationNotice = integrations.openclaw.status_message;
+      syncIntegrationForms();
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function testOpenClawSettings() {
+    busy = true;
+    try {
+      integrations = await api.testOpenClawSettings();
+      integrationNotice = integrations.openclaw.status_message;
+      syncIntegrationForms();
+    } finally {
+      busy = false;
+    }
+  }
+
+  onMount(loadAll);
+</script>
+
+<svelte:head>
+  <title>Lifebot MVP</title>
+</svelte:head>
+
+{#if loading}
+  <main class="shell loading">Loading Lifebot demo workspace...</main>
+{:else if error}
+  <main class="shell loading">
+    <section class="error-card">
+      <h1>Lifebot could not start</h1>
+      <p>{error}</p>
+      <button on:click={loadAll}>Try again</button>
+    </section>
+  </main>
+{:else}
+  <main class="shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <p class="eyebrow">Aquatics operations assistant</p>
+        <h1>Lifebot</h1>
+        <p>Desktop-first scheduling overlay for aquatics teams.</p>
+      </div>
+      <nav>
+        {#each tabs as tab}
+          <button class:active={activeTab === tab.id} on:click={() => (activeTab = tab.id)}>
+            {tab.label}
+          </button>
+        {/each}
+      </nav>
+      <div class="sidebar-note">
+        <strong>Demo mode</strong>
+        <p>Safe seeded data for supervisor review. The app now stores integration setup on its own.</p>
+      </div>
+    </aside>
+
+    <section class="content">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Current status</p>
+          <h2>{dashboard?.next_cycle_name} is {dashboard?.draft_status?.replaceAll("_", " ")}</h2>
+          <p>
+            Lifebot keeps recurring shifts when the incumbent requests before the deadline,
+            then awards open shifts to the first eligible requester.
+          </p>
+        </div>
+        <div class="hero-actions">
+          <button class="primary" disabled={busy} on:click={generateDraft}>
+            Generate next-cycle draft
+          </button>
+          <button disabled={busy} on:click={approveDraft}>Approve draft for review</button>
+        </div>
+      </header>
+
+      {#if activeTab === "dashboard"}
+        <section class="grid stats">
+          <article class="card stat">
+            <span>Active guards</span>
+            <strong>{dashboard?.active_guards}</strong>
+          </article>
+          <article class="card stat">
+            <span>Open draft shifts</span>
+            <strong>{dashboard?.open_shift_count}</strong>
+          </article>
+          <article class="card stat">
+            <span>Queued requests</span>
+            <strong>{dashboard?.pending_request_count}</strong>
+          </article>
+          <article class="card stat">
+            <span>Certifications expiring soon</span>
+            <strong>{dashboard?.expiring_cert_count}</strong>
+          </article>
+        </section>
+
+        <section class="grid two-up">
+          <article class="card">
+            <h3>What the assistant can do</h3>
+            <ul>
+              {#each assistantExamples as example}
+                <li>{example}</li>
+              {/each}
+            </ul>
+          </article>
+          <article class="card">
+            <h3>One-click integration setup</h3>
+            <p>Lifebot now keeps Sling and OpenClaw settings inside the app so coordinators do not need to edit `.env` files.</p>
+            <div class="stack compact">
+              <div class="status-pill">
+                Sling: {integrations?.sling.status?.replaceAll("_", " ")}
+              </div>
+              <div class="status-pill">
+                OpenClaw: {integrations?.openclaw.status?.replaceAll("_", " ")}
+              </div>
+              <button class="primary" on:click={() => (activeTab = "integrations")}>
+                Open integrations setup
+              </button>
+            </div>
+          </article>
+        </section>
+      {/if}
+
+      {#if activeTab === "guards"}
+        <section class="card table-card">
+          <h3>Guard profiles</h3>
+          <div class="table">
+            {#each guards as guard}
+              <article class="row profile">
+                <div>
+                  <strong>{guard.name}</strong>
+                  <p>{guard.age} years old • {guard.roles.join(", ")}</p>
+                  <small>{guard.phone} • {guard.email}</small>
+                </div>
+                <div>
+                  <p><strong>Preferences:</strong> {guard.preferred_shifts}</p>
+                  <p><strong>Notes:</strong> {guard.notes}</p>
+                </div>
+                <div class="stack compact">
+                  <p><strong>Certifications</strong></p>
+                  {#each guard.certifications as cert}
+                    <small>{cert.certification}: {cert.expires_on} ({cert.status})</small>
+                  {/each}
+                </div>
+              </article>
+            {/each}
+          </div>
+        </section>
+      {/if}
+
+      {#if activeTab === "schedule"}
+        <section class="card table-card">
+          <h3>Current and next-cycle shifts</h3>
+          <div class="table">
+            {#each shifts as shift}
+              <article class="row">
+                <div>
+                  <strong>{shift.template_name}</strong>
+                  <p>{shift.day_name} • {shift.start_time} to {shift.end_time}</p>
+                </div>
+                <div>
+                  <p>{shift.site_name} • {shift.pool_name}</p>
+                  <small>{shift.role_name}</small>
+                </div>
+                <div>
+                  <p><strong>Cycle:</strong> {shift.cycle_name}</p>
+                  <small>Incumbent: {shift.incumbent_guard_name ?? "None"}</small>
+                </div>
+                <div>
+                  <p><strong>Assigned:</strong> {shift.assigned_guard_name ?? "Open"}</p>
+                  <small>Status: {shift.assignment_status}</small>
+                </div>
+              </article>
+            {/each}
+          </div>
+        </section>
+      {/if}
+
+      {#if activeTab === "queue"}
+        <section class="card table-card">
+          <h3>Request queue</h3>
+          <p>Requests stay visible even when someone is skipped, so coordinators can explain what happened.</p>
+          <div class="table">
+            {#each queue as request}
+              <article class="row">
+                <div>
+                  <strong>{request.template_name}</strong>
+                  <p>{request.requester_name}</p>
+                </div>
+                <div>
+                  <p>Requested at {request.requested_at}</p>
+                  <small>Status: {request.status}</small>
+                </div>
+                <div>
+                  <p>{request.reason ?? "No issue recorded."}</p>
+                </div>
+              </article>
+            {/each}
+          </div>
+        </section>
+      {/if}
+
+      {#if activeTab === "violations"}
+        <section class="card table-card">
+          <h3>Policy violations and skips</h3>
+          <div class="table">
+            {#each violations as violation}
+              <article class="row">
+                <div>
+                  <strong>{violation.guard_name}</strong>
+                  <p>{violation.template_name}</p>
+                </div>
+                <div>
+                  <p>{violation.violation}</p>
+                </div>
+                <div>
+                  <p>{violation.reason}</p>
+                </div>
+              </article>
+            {/each}
+          </div>
+        </section>
+      {/if}
+
+      {#if activeTab === "certs"}
+        <section class="card table-card">
+          <h3>Certification renewals</h3>
+          <div class="table">
+            {#each expirations as cert}
+              <article class="row">
+                <div>
+                  <strong>{cert.guard_name}</strong>
+                  <p>{cert.certification}</p>
+                </div>
+                <div>
+                  <p>Expires on {cert.expires_on}</p>
+                  <small>{cert.days_remaining} days remaining</small>
+                </div>
+              </article>
+            {/each}
+          </div>
+        </section>
+      {/if}
+
+      {#if activeTab === "draft"}
+        <section class="grid two-up">
+          <article class="card">
+            <h3>Decision summaries</h3>
+            <div class="stack">
+              {#each traces as trace}
+                <button class="list-row" on:click={() => showTrace(trace.id)}>
+                  <span>{trace.summary}</span>
+                  <small>{trace.decided_at}</small>
+                </button>
+              {/each}
+            </div>
+          </article>
+          <article class="card">
+            <h3>Why this decision happened</h3>
+            {#if selectedTrace}
+              <p>{selectedTrace.summary}</p>
+              <pre>{JSON.stringify(selectedTrace.payload, null, 2)}</pre>
+            {:else}
+              <p>Select a decision to see the reasoning trace.</p>
+            {/if}
+          </article>
+        </section>
+      {/if}
+
+      {#if activeTab === "assistant"}
+        <section class="grid two-up">
+          <article class="card">
+            <h3>Ask Lifebot in plain English</h3>
+            <p>Example prompts are shown below, and the assistant uses the same internal tools that a future OpenClaw adapter would call.</p>
+            <div class="stack">
+              {#each assistantExamples as example}
+                <button class="list-row" on:click={() => (assistantQuery = example)}>
+                  <span>{example}</span>
+                </button>
+              {/each}
+            </div>
+            <textarea
+              bind:value={assistantQuery}
+              placeholder="Ask about open shifts, queues, rollover, certifications, or why someone did not get a shift."
+            />
+            <button class="primary" disabled={busy} on:click={runAssistant}>Run assistant action</button>
+          </article>
+          <article class="card">
+            <h3>{assistantResponse?.title ?? "Assistant response"}</h3>
+            <p>{assistantResponse?.explanation ?? "Responses will appear here."}</p>
+            {#if assistantResponse}
+              <pre>{JSON.stringify(assistantResponse.data, null, 2)}</pre>
+            {/if}
+          </article>
+        </section>
+      {/if}
+
+      {#if activeTab === "integrations"}
+        <section class="grid two-up">
+          <article class="card">
+            <h3>Connect Sling</h3>
+            <p>Supervisors can paste credentials here once. Lifebot stores them in the app's local data store so nobody has to create or edit a `.env` file.</p>
+            <div class="status-block">
+              <strong>Status</strong>
+              <p>{integrations?.sling.status?.replaceAll("_", " ")}</p>
+              <small>{integrations?.sling.status_message}</small>
+            </div>
+            <label>
+              <span>Sling API key</span>
+              <input bind:value={slingApiKey} placeholder={integrations?.sling.api_key_present ? "API key saved. Paste a new one to replace it." : "Paste your Sling API key"} />
+            </label>
+            <label>
+              <span>Workspace or account ID</span>
+              <input bind:value={slingWorkspaceId} placeholder="Optional for MVP" />
+            </label>
+            <label>
+              <span>Base URL</span>
+              <input bind:value={slingBaseUrl} />
+            </label>
+            <label class="toggle">
+              <input type="checkbox" bind:checked={slingAutoImportEnabled} />
+              <span>Remember that Sling import should run automatically when the real provider is added later.</span>
+            </label>
+            <div class="hero-actions">
+              <button class="primary" disabled={busy} on:click={saveSlingSettings}>Save Sling settings</button>
+              <button disabled={busy} on:click={testSlingSettings}>Test connection</button>
+            </div>
+          </article>
+
+          <article class="card">
+            <h3>Enable OpenClaw or NanoClaw-style orchestration</h3>
+            <p>For MVP 1 this is a mock local adapter, but the setup flow is designed to feel like a one-click install instead of a repo-management task.</p>
+            <div class="status-block">
+              <strong>Status</strong>
+              <p>{integrations?.openclaw.status?.replaceAll("_", " ")}</p>
+              <small>{integrations?.openclaw.status_message}</small>
+            </div>
+            <label>
+              <span>Adapter endpoint</span>
+              <input bind:value={openClawEndpoint} placeholder="http://127.0.0.1:7331" />
+            </label>
+            <label class="toggle">
+              <input type="checkbox" bind:checked={openClawEnabled} />
+              <span>Enable the adapter boundary so external assistant tooling can call Lifebot's internal tools.</span>
+            </label>
+            <label class="toggle">
+              <input type="checkbox" bind:checked={openClawAutoLaunchEnabled} />
+              <span>Remember that Lifebot should try to auto-launch the adapter when a packaged installer is added later.</span>
+            </label>
+            <div class="hero-actions">
+              <button class="primary" disabled={busy} on:click={installOpenClawAdapter}>Install mock adapter</button>
+              <button disabled={busy} on:click={saveOpenClawSettings}>Save adapter settings</button>
+              <button disabled={busy} on:click={testOpenClawSettings}>Run contract test</button>
+            </div>
+          </article>
+        </section>
+
+        <section class="card">
+          <h3>Coordinator-friendly setup notes</h3>
+          <p>{integrationNotice || "Use these forms to keep integration setup inside the app rather than in repo files."}</p>
+          <div class="grid two-up">
+            <div class="status-block">
+              <strong>Developer mode</strong>
+              <small>`.env` is still supported for local development, testing, and CI.</small>
+            </div>
+            <div class="status-block">
+              <strong>End-user mode</strong>
+              <small>Packaged builds should rely on these saved settings instead of asking supervisors to touch environment files.</small>
+            </div>
+          </div>
+        </section>
+      {/if}
+    </section>
+  </main>
+{/if}
+
+<style>
+  :global(body) {
+    margin: 0;
+    font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+    background:
+      radial-gradient(circle at top left, rgba(255, 190, 92, 0.18), transparent 30%),
+      linear-gradient(135deg, #f5f0e7, #d8ebf2 55%, #b8dbe7);
+    color: #163746;
+  }
+
+  .shell {
+    min-height: 100vh;
+    display: grid;
+    grid-template-columns: 260px 1fr;
+  }
+
+  .loading {
+    place-items: center;
+    display: grid;
+  }
+
+  .sidebar {
+    background: rgba(10, 44, 57, 0.92);
+    color: #f4f0e5;
+    padding: 28px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+
+  .brand h1,
+  .hero h2,
+  h3 {
+    font-family: "Fraunces", Georgia, serif;
+  }
+
+  .eyebrow {
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    font-size: 0.72rem;
+    opacity: 0.8;
+  }
+
+  nav {
+    display: grid;
+    gap: 8px;
+  }
+
+  button {
+    border: 0;
+    border-radius: 14px;
+    padding: 12px 14px;
+    font: inherit;
+    cursor: pointer;
+    background: rgba(255, 255, 255, 0.12);
+    color: inherit;
+    text-align: left;
+    transition: transform 120ms ease, background 120ms ease;
+  }
+
+  button:hover {
+    transform: translateY(-1px);
+  }
+
+  nav button.active,
+  button.primary {
+    background: #ee8a3b;
+    color: #112630;
+  }
+
+  .sidebar-note {
+    margin-top: auto;
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: 16px;
+    padding: 14px;
+  }
+
+  .content {
+    padding: 28px;
+    display: grid;
+    gap: 22px;
+  }
+
+  .hero,
+  .card {
+    background: rgba(255, 252, 247, 0.78);
+    backdrop-filter: blur(10px);
+    border: 1px solid rgba(22, 55, 70, 0.08);
+    border-radius: 24px;
+    box-shadow: 0 18px 50px rgba(22, 55, 70, 0.08);
+  }
+
+  .hero {
+    padding: 24px;
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    align-items: center;
+  }
+
+  .hero-actions {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+
+  .grid {
+    display: grid;
+    gap: 18px;
+  }
+
+  .stats {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .two-up {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .card {
+    padding: 22px;
+  }
+
+  .stat strong {
+    display: block;
+    font-size: 2rem;
+    margin-top: 10px;
+  }
+
+  .table {
+    display: grid;
+    gap: 12px;
+  }
+
+  .row,
+  .list-row {
+    background: rgba(255, 255, 255, 0.7);
+    border-radius: 18px;
+    padding: 14px;
+    display: grid;
+    gap: 8px;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    color: #163746;
+  }
+
+  .profile {
+    grid-template-columns: 1.3fr 1fr 1fr;
+  }
+
+  .list-row {
+    grid-template-columns: 1fr;
+    text-align: left;
+  }
+
+  .stack {
+    display: grid;
+    gap: 10px;
+  }
+
+  .compact {
+    gap: 6px;
+  }
+
+  textarea,
+  pre,
+  input {
+    width: 100%;
+    box-sizing: border-box;
+    border-radius: 18px;
+    border: 1px solid rgba(22, 55, 70, 0.15);
+    padding: 14px;
+    font: inherit;
+    background: rgba(255, 255, 255, 0.78);
+    color: #163746;
+  }
+
+  textarea {
+    min-height: 130px;
+    resize: vertical;
+    margin: 12px 0;
+  }
+
+  pre {
+    overflow: auto;
+    max-height: 420px;
+    font-size: 0.85rem;
+  }
+
+  label {
+    display: grid;
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+
+  .toggle {
+    grid-template-columns: auto 1fr;
+    align-items: start;
+    gap: 12px;
+  }
+
+  .toggle input {
+    width: auto;
+    margin-top: 2px;
+  }
+
+  .status-block,
+  .status-pill {
+    background: rgba(255, 255, 255, 0.65);
+    border-radius: 18px;
+    padding: 14px;
+  }
+
+  .error-card {
+    max-width: 520px;
+    background: rgba(255, 252, 247, 0.92);
+    padding: 24px;
+    border-radius: 24px;
+  }
+
+  @media (max-width: 1100px) {
+    .shell,
+    .stats,
+    .two-up,
+    .row,
+    .profile {
+      grid-template-columns: 1fr;
+    }
+
+    .hero {
+      flex-direction: column;
+      align-items: flex-start;
+    }
+  }
+</style>

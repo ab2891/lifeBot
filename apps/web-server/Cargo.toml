@@ -1,0 +1,19 @@
+[package]
+name = "lifebot-web-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "lifebot-web"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+axum = { version = "0.8", features = ["json"] }
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["fs", "cors"] }
+lifebot-core = { path = "../../crates/core" }
+lifebot-assistant-tools = { path = "../../packages/assistant-tools" }
