@@ -46,30 +46,42 @@ jobs:
         working-directory: apps/desktop
         run: npm run frontend:build
 
-      - name: Build Tauri app
+      - name: Build Tauri app (Linux/macOS)
+        if: runner.os != 'Windows'
         working-directory: apps/desktop
-        run: npx tauri build
+        run: |
+          ICONS="$GITHUB_WORKSPACE/apps/desktop/src-tauri/icons"
+          npx tauri build --config "{\"bundle\":{\"icon\":[\"$ICONS/icon.png\",\"$ICONS/32x32.png\",\"$ICONS/128x128.png\",\"$ICONS/128x128@2x.png\",\"$ICONS/icon.icns\",\"$ICONS/icon.ico\"]}}"
+
+      - name: Build Tauri app (Windows)
+        if: runner.os == 'Windows'
+        working-directory: apps/desktop
+        shell: pwsh
+        run: |
+          $icons = "$env:GITHUB_WORKSPACE/apps/desktop/src-tauri/icons" -replace '\\','/'
+          $config = "{`"bundle`":{`"icon`":[`"$icons/icon.png`",`"$icons/32x32.png`",`"$icons/128x128.png`",`"$icons/128x128@2x.png`",`"$icons/icon.icns`",`"$icons/icon.ico`"]}}"
+          npx tauri build --config $config
 
       - name: Collect bundles (Linux)
         if: runner.os == 'Linux'
         run: |
           mkdir -p staging
-          cp apps/desktop/src-tauri/target/release/bundle/deb/*.deb staging/ 2>/dev/null || true
-          cp apps/desktop/src-tauri/target/release/bundle/appimage/*.AppImage staging/ 2>/dev/null || true
+          cp target/release/bundle/deb/*.deb staging/ 2>/dev/null || true
+          cp target/release/bundle/appimage/*.AppImage staging/ 2>/dev/null || true
 
       - name: Collect bundles (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path staging
-          Copy-Item "apps/desktop/src-tauri/target/release/bundle/msi/*.msi" staging/ -ErrorAction SilentlyContinue
-          Copy-Item "apps/desktop/src-tauri/target/release/bundle/nsis/*.exe" staging/ -ErrorAction SilentlyContinue
+          Copy-Item "target/release/bundle/msi/*.msi" staging/ -ErrorAction SilentlyContinue
+          Copy-Item "target/release/bundle/nsis/*.exe" staging/ -ErrorAction SilentlyContinue
 
       - name: Collect bundles (macOS)
         if: runner.os == 'macOS'
         run: |
           mkdir -p staging
-          cp apps/desktop/src-tauri/target/release/bundle/dmg/*.dmg staging/ 2>/dev/null || true
+          cp target/release/bundle/dmg/*.dmg staging/ 2>/dev/null || true
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
