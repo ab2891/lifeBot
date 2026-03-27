@@ -11,6 +11,8 @@ mod commands {
     use std::env;
 
     use lifebot_assistant_tools::AssistantTools;
+    use lifebot_sling::SlingClient;
+    use lifebot_core::models::{ImportRunResult, SetupStatus};
     use serde::Serialize;
     use tauri::{Manager, State};
 
@@ -224,6 +226,117 @@ mod commands {
             service.run_assistant_query(&query)
         })
     }
+
+    // --- Sling integration ---
+
+    #[tauri::command]
+    pub fn get_setup_status(state: State<AppState>) -> Result<SetupStatus, String> {
+        with_service(&state, |service| service.setup_status())
+    }
+
+    #[tauri::command]
+    pub fn init_app_mode(mode: String, state: State<AppState>) -> Result<(), String> {
+        with_service(&state, |service| service.init_app_mode(&mode))
+    }
+
+    #[tauri::command]
+    pub async fn sling_connect(
+        email: String,
+        password: String,
+        state: State<'_, AppState>,
+    ) -> Result<String, String> {
+        let client = SlingClient::login(&email, &password)
+            .await
+            .map_err(|e| e.to_string())?;
+        let token = client.token().to_string();
+        let org_id = client.org_id();
+        with_service(&state, |service| {
+            service.store_sling_session(&token, org_id)
+        })?;
+        Ok(format!("Connected to Sling (org_id={})", org_id))
+    }
+
+    #[tauri::command]
+    pub async fn sling_import(
+        date_from: String,
+        date_to: String,
+        cycle_name: String,
+        state: State<'_, AppState>,
+    ) -> Result<ImportRunResult, String> {
+        // Read stored credentials from DB
+        let (token, org_id) = {
+            let guard = state
+                .service
+                .lock()
+                .map_err(|_| "Unable to lock app state".to_string())?;
+            let service = guard
+                .as_ref()
+                .ok_or_else(|| "Lifebot service is not initialized".to_string())?;
+            let conn = service.db().connect().map_err(|e| e.to_string())?;
+            let token: String = conn
+                .query_row(
+                    "SELECT value FROM app_settings WHERE key = 'sling_token'",
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            let org_id_str: String = conn
+                .query_row(
+                    "SELECT value FROM app_settings WHERE key = 'sling_org_id'",
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            let org_id: i64 = org_id_str
+                .parse()
+                .map_err(|e: std::num::ParseIntError| e.to_string())?;
+            drop(conn);
+            (token, org_id)
+        };
+
+        // Fetch data from Sling
+        let sling = SlingClient::from_token(token, org_id);
+        let dates = format!("{}T00:00:00Z/{}T23:59:59Z", date_from, date_to);
+        let users = sling.fetch_users().await.map_err(|e| e.to_string())?;
+        let groups = sling.fetch_groups().await.map_err(|e| e.to_string())?;
+        let shifts = sling.fetch_shifts(&dates).await.map_err(|e| e.to_string())?;
+
+        // Create cycle and run import
+        with_service(&state, |service| {
+            let cycle_id = service.create_cycle(
+                &cycle_name,
+                &date_from,
+                &date_to,
+                &date_to, // rollover_deadline defaults to end date
+            )?;
+            service.run_import(users, groups, shifts, &cycle_id)
+        })
+    }
+
+    #[tauri::command]
+    pub async fn sling_export(cycle_id: String) -> Result<String, String> {
+        // TODO(Task 10): implement build_sling_export on the service layer
+        let _ = cycle_id;
+        Err("Export not yet implemented".to_string())
+    }
+
+    #[tauri::command]
+    pub fn create_scheduling_cycle(
+        name: String,
+        starts_on: String,
+        ends_on: String,
+        rollover_deadline: String,
+        state: State<AppState>,
+    ) -> Result<String, String> {
+        with_service(&state, |service| {
+            service.create_cycle(&name, &starts_on, &ends_on, &rollover_deadline)
+        })
+    }
+
+    #[tauri::command]
+    pub fn reseed_demo(state: State<AppState>) -> Result<(), String> {
+        with_service(&state, |service| service.init_app_mode("demo"))
+    }
 }
 
 pub fn run() {
@@ -280,7 +393,14 @@ pub fn run() {
             commands::sentinel_run_detection,
             commands::get_integrations,
             commands::save_integration,
-            commands::disconnect_integration
+            commands::disconnect_integration,
+            commands::get_setup_status,
+            commands::init_app_mode,
+            commands::sling_connect,
+            commands::sling_import,
+            commands::sling_export,
+            commands::create_scheduling_cycle,
+            commands::reseed_demo
         ])
         .run(tauri::generate_context!())
         .expect("error while running Lifebot desktop");
