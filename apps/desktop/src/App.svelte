@@ -250,8 +250,8 @@
   async function sentinelAction(alertId: string, action: string) {
     busy = true;
     try {
-      // Use first guard as actor for demo
-      const actorId = guards.length > 0 ? guards[0].id : "demo-user";
+      // Use first guard as actor
+      const actorId = guards.length > 0 ? guards[0].id : "unknown-user";
       const notes = action === "false_positive" ? "Marked as false positive" : action === "escalated" ? "Escalating to additional staff" : "";
       await api.sentinelAcknowledge(alertId, actorId, action, notes);
       await refreshSentinel();
@@ -351,7 +351,7 @@
 </script>
 
 <svelte:head>
-  <title>Lifebot MVP</title>
+  <title>Lifebot</title>
 </svelte:head>
 
 {#if loading}
