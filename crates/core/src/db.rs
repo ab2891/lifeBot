@@ -32,25 +32,36 @@ impl LifebotDb {
 
     pub fn migrate(&self) -> Result<()> {
         let conn = self.connect()?;
-        conn.execute_batch(MIGRATION_001)?;
-        conn.execute_batch(MIGRATION_002)?;
-        conn.execute_batch(MIGRATION_003)?;
-
-        // Migration 004: add Sling ID columns (idempotent via ensure_column)
-        ensure_column(&conn, "guards", "sling_id", "INTEGER")?;
-        ensure_column(&conn, "sites", "sling_id", "INTEGER")?;
-        ensure_column(&conn, "roles", "sling_id", "INTEGER")?;
-        ensure_column(&conn, "shifts", "sling_shift_id", "TEXT")?;
-        conn.execute_batch(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_guards_sling_id ON guards(sling_id) WHERE sling_id IS NOT NULL;
-             CREATE UNIQUE INDEX IF NOT EXISTS idx_sites_sling_id ON sites(sling_id) WHERE sling_id IS NOT NULL;
-             CREATE UNIQUE INDEX IF NOT EXISTS idx_roles_sling_id ON roles(sling_id) WHERE sling_id IS NOT NULL;
-             CREATE UNIQUE INDEX IF NOT EXISTS idx_shifts_sling_id ON shifts(sling_shift_id) WHERE sling_shift_id IS NOT NULL;",
-        )?;
-        conn.execute_batch(MIGRATION_004)?;
-
+        migrate_conn(&conn)?;
         Ok(())
     }
+}
+
+/// Run all migrations on an existing connection.
+///
+/// This is useful for in-memory databases (e.g. in tests) where every
+/// `Connection::open(":memory:")` call creates a *separate* database, so
+/// `migrate()` and `connect()` would otherwise operate on different empty
+/// databases.
+pub fn migrate_conn(conn: &Connection) -> Result<()> {
+    conn.execute_batch(MIGRATION_001)?;
+    conn.execute_batch(MIGRATION_002)?;
+    conn.execute_batch(MIGRATION_003)?;
+
+    // Migration 004: add Sling ID columns (idempotent via ensure_column)
+    ensure_column(conn, "guards", "sling_id", "INTEGER")?;
+    ensure_column(conn, "sites", "sling_id", "INTEGER")?;
+    ensure_column(conn, "roles", "sling_id", "INTEGER")?;
+    ensure_column(conn, "shifts", "sling_shift_id", "TEXT")?;
+    conn.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_guards_sling_id ON guards(sling_id) WHERE sling_id IS NOT NULL;
+         CREATE UNIQUE INDEX IF NOT EXISTS idx_sites_sling_id ON sites(sling_id) WHERE sling_id IS NOT NULL;
+         CREATE UNIQUE INDEX IF NOT EXISTS idx_roles_sling_id ON roles(sling_id) WHERE sling_id IS NOT NULL;
+         CREATE UNIQUE INDEX IF NOT EXISTS idx_shifts_sling_id ON shifts(sling_shift_id) WHERE sling_shift_id IS NOT NULL;",
+    )?;
+    conn.execute_batch(MIGRATION_004)?;
+
+    Ok(())
 }
 
 /// Add a column to a table only if it does not already exist.
