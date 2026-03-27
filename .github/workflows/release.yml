@@ -58,9 +58,10 @@ jobs:
         working-directory: apps/desktop
         shell: pwsh
         run: |
-          $icons = "$env:GITHUB_WORKSPACE/apps/desktop/src-tauri/icons" -replace '\\','/'
-          $config = "{`"bundle`":{`"icon`":[`"$icons/icon.png`",`"$icons/32x32.png`",`"$icons/128x128.png`",`"$icons/128x128@2x.png`",`"$icons/icon.icns`",`"$icons/icon.ico`"]}}"
-          npx tauri build --config $config
+          $icons = ("$env:GITHUB_WORKSPACE/apps/desktop/src-tauri/icons" -replace '\\','/')
+          $cfg = @{ bundle = @{ icon = @("$icons/icon.png","$icons/32x32.png","$icons/128x128.png","$icons/128x128@2x.png","$icons/icon.icns","$icons/icon.ico") } }
+          $cfg | ConvertTo-Json -Depth 5 -Compress | Set-Content -Path tauri-ci.json
+          npx tauri build --config tauri-ci.json
 
       - name: Collect bundles (Linux)
         if: runner.os == 'Linux'
