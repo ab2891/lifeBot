@@ -15,7 +15,8 @@ import type {
   SentinelEvent,
   SetupStatus,
   ShiftAssignmentView,
-  ShiftQueueEntry
+  ShiftQueueEntry,
+  SlingExportResult
 } from "@lifebot/shared-types";
 
 // Detect Tauri environment
@@ -239,6 +240,11 @@ export const api = {
     isTauri
       ? tauriInvoke<ImportRunResult>("sling_import", { dateFrom, dateTo, cycleName })
       : fetchJson<ImportRunResult>("/api/sling/import", { method: "POST", body: JSON.stringify({ dateFrom, dateTo, cycleName }) }),
+
+  slingExport: (cycleId: string) =>
+    isTauri
+      ? tauriInvoke<SlingExportResult>("sling_export", { cycleId })
+      : fetchJson<SlingExportResult>("/api/sling/export", { method: "POST", body: JSON.stringify({ cycleId }) }),
 
   reseedDemo: () =>
     isTauri

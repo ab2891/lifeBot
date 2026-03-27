@@ -18,7 +18,8 @@
     SentinelEvent,
     SetupStatus,
     ShiftAssignmentView,
-    ShiftQueueEntry
+    ShiftQueueEntry,
+    SlingExportResult
   } from "@lifebot/shared-types";
 
   type Tab =
@@ -59,6 +60,8 @@
   let importDateTo = '';
   let importCycleName = '';
   let importResult: ImportRunResult | null = null;
+  let exportResult: SlingExportResult | null = null;
+  let exportMessage = '';
   let setupError = '';
   let dashboard: DashboardData | null = null;
   let guards: GuardProfile[] = [];
@@ -206,6 +209,25 @@
       await api.approveDraft();
       dashboard = await api.dashboard();
       shifts = await api.shifts();
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function exportToSling() {
+    busy = true;
+    exportMessage = '';
+    exportResult = null;
+    try {
+      const result = await api.slingExport('cycle-next');
+      exportResult = result;
+      if (result.errors.length > 0) {
+        exportMessage = `Export completed with errors: ${result.errors.join('; ')}`;
+      } else {
+        exportMessage = `Exported ${result.shifts_exported} shift(s) to Sling successfully.`;
+      }
+    } catch (err) {
+      exportMessage = `Export failed: ${err instanceof Error ? err.message : String(err)}`;
     } finally {
       busy = false;
     }
@@ -477,7 +499,15 @@
         <div class="topbar-actions">
           <button class="btn-primary" disabled={busy} on:click={generateDraft}>Generate draft</button>
           <button class="btn-secondary" disabled={busy} on:click={approveDraft}>Approve draft</button>
+          {#if setupStatus?.app_mode === 'live'}
+            <button class="btn-secondary" disabled={busy} on:click={exportToSling}>Export to Sling</button>
+          {/if}
         </div>
+        {#if exportMessage}
+          <div class="export-message" class:export-error={exportResult?.errors?.length > 0 || !exportResult}>
+            {exportMessage}
+          </div>
+        {/if}
       </div>
 
       <div class="content">

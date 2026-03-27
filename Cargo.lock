@@ -1957,6 +1957,7 @@ dependencies = [
  "lifebot-assistant-tools",
  "lifebot-core",
  "lifebot-openclaw-adapter",
+ "lifebot-sling",
  "serde",
  "serde_json",
  "tauri",

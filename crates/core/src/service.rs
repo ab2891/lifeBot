@@ -5,7 +5,7 @@ use chrono::{Datelike, NaiveDate, Utc};
 use rusqlite::{params, OptionalExtension};
 use serde_json::json;
 
-use lifebot_sling::mapping;
+use lifebot_sling::{mapping, SlingShiftCreate, SlingShiftRef, SlingShiftUser};
 
 use crate::{
     db::LifebotDb,
@@ -817,6 +817,54 @@ impl LifebotService {
             params![id, name, starts_on, ends_on, rollover_deadline],
         )?;
         Ok(id)
+    }
+
+    /// Build a list of Sling shift payloads for all reviewed/accepted assignments
+    /// in the given cycle, ready to push to the Sling API.
+    pub fn build_sling_export(&self, cycle_id: &str) -> Result<Vec<SlingShiftCreate>> {
+        let conn = self.db.connect()?;
+        let mut stmt = conn.prepare(
+            "SELECT
+                sh.shift_date,
+                st.start_time,
+                st.end_time,
+                st.name,
+                g.sling_id,
+                si.sling_id,
+                r.sling_id
+             FROM shift_assignments sa
+             JOIN shifts sh ON sh.id = sa.shift_id
+             JOIN shift_templates st ON st.id = sh.template_id
+             JOIN guards g ON g.id = sa.guard_id
+             LEFT JOIN sites si ON si.id = st.site_id
+             LEFT JOIN roles r ON r.id = st.role_id
+             WHERE sh.cycle_id = ?1
+               AND sa.status IN ('reviewed', 'accepted')"
+        )?;
+        let rows = stmt.query_map(params![cycle_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,   // shift_date
+                row.get::<_, String>(1)?,   // start_time
+                row.get::<_, String>(2)?,   // end_time
+                row.get::<_, String>(3)?,   // template name (summary)
+                row.get::<_, Option<i64>>(4)?, // guard sling_id
+                row.get::<_, Option<i64>>(5)?, // site sling_id
+                row.get::<_, Option<i64>>(6)?, // role sling_id
+            ))
+        })?;
+        let mut result = Vec::new();
+        for row in rows {
+            let (shift_date, start_time, end_time, name, guard_sling_id, site_sling_id, role_sling_id) = row?;
+            result.push(SlingShiftCreate {
+                dtstart: format!("{}T{}:00Z", shift_date, start_time),
+                dtend: format!("{}T{}:00Z", shift_date, end_time),
+                user: guard_sling_id.map(|id| SlingShiftUser { id }),
+                location: site_sling_id.map(|id| SlingShiftRef { id }),
+                position: role_sling_id.map(|id| SlingShiftRef { id }),
+                summary: Some(name),
+            });
+        }
+        Ok(result)
     }
 
     pub fn log_message(&self, provider: &str, body: &str) -> Result<()> {

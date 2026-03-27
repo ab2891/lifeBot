@@ -12,7 +12,7 @@ mod commands {
 
     use lifebot_assistant_tools::AssistantTools;
     use lifebot_sling::SlingClient;
-    use lifebot_core::models::{ImportRunResult, SetupStatus};
+    use lifebot_core::models::{ImportRunResult, SetupStatus, SlingExportResult};
     use serde::Serialize;
     use tauri::{Manager, State};
 
@@ -314,10 +314,61 @@ mod commands {
     }
 
     #[tauri::command]
-    pub async fn sling_export(cycle_id: String) -> Result<String, String> {
-        // TODO(Task 10): implement build_sling_export on the service layer
-        let _ = cycle_id;
-        Err("Export not yet implemented".to_string())
+    pub async fn sling_export(
+        cycle_id: String,
+        state: State<'_, AppState>,
+    ) -> Result<SlingExportResult, String> {
+        // Build the list of shift payloads from the service layer.
+        let shifts = with_service(&state, |service| service.build_sling_export(&cycle_id))?;
+
+        if shifts.is_empty() {
+            return Ok(SlingExportResult {
+                shifts_exported: 0,
+                errors: vec!["No reviewed or accepted assignments found for this cycle.".to_string()],
+            });
+        }
+
+        // Read stored Sling credentials.
+        let (token, org_id) = {
+            let guard = state
+                .service
+                .lock()
+                .map_err(|_| "Unable to lock app state".to_string())?;
+            let service = guard
+                .as_ref()
+                .ok_or_else(|| "Lifebot service is not initialized".to_string())?;
+            let conn = service.db().connect().map_err(|e| e.to_string())?;
+            let token: String = conn
+                .query_row(
+                    "SELECT value FROM app_settings WHERE key = 'sling_token'",
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            let org_id_str: String = conn
+                .query_row(
+                    "SELECT value FROM app_settings WHERE key = 'sling_org_id'",
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            let org_id: i64 = org_id_str
+                .parse()
+                .map_err(|e: std::num::ParseIntError| e.to_string())?;
+            drop(conn);
+            (token, org_id)
+        };
+
+        let client = SlingClient::from_token(token, org_id);
+        client
+            .create_shifts(&shifts)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        Ok(SlingExportResult {
+            shifts_exported: shifts.len(),
+            errors: vec![],
+        })
     }
 
     #[tauri::command]
