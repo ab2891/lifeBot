@@ -42,13 +42,13 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
+      - name: Build frontend
+        working-directory: apps/desktop
+        run: npm run frontend:build
+
       - name: Build Tauri app
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          projectPath: apps/desktop
-          tauriScript: npm run tauri --
+        working-directory: apps/desktop
+        run: npx tauri build
 
       - name: Collect bundles (Linux)
         if: runner.os == 'Linux'
