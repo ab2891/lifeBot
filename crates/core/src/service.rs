@@ -5,12 +5,15 @@ use chrono::{Datelike, NaiveDate, Utc};
 use rusqlite::{params, OptionalExtension};
 use serde_json::json;
 
+use lifebot_sling::mapping;
+
 use crate::{
     db::LifebotDb,
+    import,
     models::{
         AssistantResponse, CertificationExpiryView, DashboardData, DecisionTraceDetail,
-        DecisionTraceSummary, GuardCertificationStatus, GuardProfile, IntegrationStatus,
-        PolicyViolationView, ShiftAssignmentView, ShiftQueueEntry,
+        DecisionTraceSummary, GuardCertificationStatus, GuardProfile, ImportRunResult,
+        IntegrationStatus, PolicyViolationView, SetupStatus, ShiftAssignmentView, ShiftQueueEntry,
     },
     scheduling::generate_next_cycle_draft,
     seed::seed_demo,
@@ -41,7 +44,15 @@ impl LifebotService {
     pub fn init(&self) -> Result<()> {
         self.db.migrate()?;
         let conn = self.db.connect()?;
-        if self.demo_mode {
+        // Check app_mode from app_settings; fall back to "demo" for backward compatibility.
+        let app_mode: String = conn
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = 'app_mode'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or_else(|_| "demo".to_string());
+        if app_mode == "demo" {
             seed_demo(&conn)?;
             crate::sentinel::seed_sentinel_demo(&conn)?;
         }
@@ -647,6 +658,165 @@ impl LifebotService {
         let conn = self.db.connect()?;
         let site_id: String = conn.query_row("SELECT site_id FROM pools WHERE id = ?1", params![pool_id], |r| r.get(0))?;
         crate::sentinel::find_current_supervisors(&conn, &site_id)
+    }
+
+    // -----------------------------------------------------------------------
+    // Sling connect, import, and cycle management
+    // -----------------------------------------------------------------------
+
+    /// Public accessor for the DB so Tauri commands can read stored credentials.
+    pub fn db(&self) -> &LifebotDb {
+        &self.db
+    }
+
+    /// Query app_settings and DB counts to build a SetupStatus snapshot.
+    pub fn setup_status(&self) -> Result<SetupStatus> {
+        let conn = self.db.connect()?;
+
+        let app_mode: String = conn
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = 'app_mode'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or_else(|_| "uninitialized".to_string());
+
+        let sling_token: String = conn
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = 'sling_token'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or_default();
+
+        let last_import: Option<String> = conn
+            .query_row(
+                "SELECT completed_at FROM import_runs ORDER BY completed_at DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        let guard_count = count(&conn, "SELECT COUNT(*) FROM guards")?;
+        let site_count = count(&conn, "SELECT COUNT(*) FROM sites")?;
+        let template_count = count(&conn, "SELECT COUNT(*) FROM shift_templates")?;
+
+        Ok(SetupStatus {
+            app_mode,
+            sling_connected: !sling_token.is_empty(),
+            last_import,
+            guard_count,
+            site_count,
+            template_count,
+        })
+    }
+
+    /// Set app_mode in app_settings. If mode == "demo", seed demo data.
+    pub fn init_app_mode(&self, mode: &str) -> Result<()> {
+        let conn = self.db.connect()?;
+        conn.execute(
+            "INSERT INTO app_settings (key, value) VALUES ('app_mode', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![mode],
+        )?;
+        if mode == "demo" {
+            seed_demo(&conn)?;
+            crate::sentinel::seed_sentinel_demo(&conn)?;
+        }
+        Ok(())
+    }
+
+    /// Store Sling session credentials and set app_mode to "live".
+    pub fn store_sling_session(&self, token: &str, org_id: i64) -> Result<()> {
+        let conn = self.db.connect()?;
+        conn.execute(
+            "INSERT INTO app_settings (key, value) VALUES ('sling_token', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![token],
+        )?;
+        conn.execute(
+            "INSERT INTO app_settings (key, value) VALUES ('sling_org_id', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![org_id.to_string()],
+        )?;
+        conn.execute(
+            "INSERT INTO app_settings (key, value) VALUES ('app_mode', 'live')
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [],
+        )?;
+        Ok(())
+    }
+
+    /// Map Sling API data through the mapping layer, upsert into the DB, and
+    /// record an import run. Returns a summary of what was imported.
+    pub fn run_import(
+        &self,
+        users: Vec<lifebot_sling::SlingUser>,
+        groups: Vec<lifebot_sling::SlingGroup>,
+        shifts: Vec<lifebot_sling::SlingShift>,
+        cycle_id: &str,
+    ) -> Result<ImportRunResult> {
+        let conn = self.db.connect()?;
+
+        // Map users → guards.
+        let guard_imports: Vec<_> = users.iter().map(mapping::map_user_to_guard).collect();
+        let (guards_imported, guards_updated) = import::upsert_guards(&conn, &guard_imports)?;
+
+        // Split groups into locations and positions.
+        let (locations, positions) = mapping::split_groups(&groups);
+        let location_pairs: Vec<(i64, String)> = locations
+            .iter()
+            .map(|g| (g.id, g.name.clone()))
+            .collect();
+        let position_pairs: Vec<(i64, String)> = positions
+            .iter()
+            .map(|g| (g.id, g.name.clone()))
+            .collect();
+
+        let (sites_imported, _) = import::upsert_sites(&conn, &location_pairs)?;
+        let (positions_imported, _) = import::upsert_roles(&conn, &position_pairs)?;
+
+        // Map shifts, filtering out any that could not be parsed.
+        let shift_imports: Vec<_> = shifts.iter().filter_map(mapping::map_shift).collect();
+        let shifts_imported = import::import_shifts(&conn, &shift_imports, cycle_id)?;
+
+        // Record the import run.
+        import::record_import_run(
+            &conn,
+            guards_imported,
+            guards_updated,
+            sites_imported,
+            positions_imported,
+            shifts_imported,
+            &[],
+        )?;
+
+        Ok(ImportRunResult {
+            guards_imported,
+            guards_updated,
+            sites_imported,
+            positions_imported,
+            shifts_imported,
+            errors: vec![],
+        })
+    }
+
+    /// Insert a scheduling cycle in "draft" status.  Returns the new cycle id.
+    pub fn create_cycle(
+        &self,
+        name: &str,
+        starts_on: &str,
+        ends_on: &str,
+        rollover_deadline: &str,
+    ) -> Result<String> {
+        let id = format!("cycle-{}", starts_on);
+        let conn = self.db.connect()?;
+        conn.execute(
+            "INSERT INTO scheduling_cycles (id, name, starts_on, ends_on, rollover_deadline, status)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'draft')",
+            params![id, name, starts_on, ends_on, rollover_deadline],
+        )?;
+        Ok(id)
     }
 
     pub fn log_message(&self, provider: &str, body: &str) -> Result<()> {
