@@ -4,6 +4,7 @@ members = [
   "apps/web-server",
   "crates/core",
   "packages/policies",
+  "packages/providers/sling",
   "packages/providers/sling-mock",
   "packages/providers/messaging",
   "packages/assistant-tools",
