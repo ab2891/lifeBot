@@ -272,14 +272,8 @@ mod commands {
             let service = guard
                 .as_ref()
                 .ok_or_else(|| "Lifebot service is not initialized".to_string())?;
+            let token = service.get_sling_token().map_err(|e| e.to_string())?;
             let conn = service.db().connect().map_err(|e| e.to_string())?;
-            let token: String = conn
-                .query_row(
-                    "SELECT value FROM app_settings WHERE key = 'sling_token'",
-                    [],
-                    |r| r.get(0),
-                )
-                .map_err(|e| e.to_string())?;
             let org_id_str: String = conn
                 .query_row(
                     "SELECT value FROM app_settings WHERE key = 'sling_org_id'",
@@ -337,14 +331,8 @@ mod commands {
             let service = guard
                 .as_ref()
                 .ok_or_else(|| "Lifebot service is not initialized".to_string())?;
+            let token = service.get_sling_token().map_err(|e| e.to_string())?;
             let conn = service.db().connect().map_err(|e| e.to_string())?;
-            let token: String = conn
-                .query_row(
-                    "SELECT value FROM app_settings WHERE key = 'sling_token'",
-                    [],
-                    |r| r.get(0),
-                )
-                .map_err(|e| e.to_string())?;
             let org_id_str: String = conn
                 .query_row(
                     "SELECT value FROM app_settings WHERE key = 'sling_org_id'",

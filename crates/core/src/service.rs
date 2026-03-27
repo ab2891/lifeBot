@@ -1,6 +1,6 @@
 use std::{env, path::PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{Datelike, NaiveDate, Utc};
 use rusqlite::{params, OptionalExtension};
 use serde_json::json;
@@ -33,7 +33,7 @@ impl LifebotService {
             .map(PathBuf::from)
             .unwrap_or_else(|_| base_dir.join("lifebot-demo.db"));
         let demo_mode = env::var("LIFEBOT_DEMO_MODE").unwrap_or_else(|_| "true".into()) == "true";
-        let admin_mode = env::var("LIFEBOT_ADMIN_MODE").unwrap_or_else(|_| "true".into()) == "true";
+        let admin_mode = env::var("LIFEBOT_ADMIN_MODE").unwrap_or_else(|_| "false".into()) == "true";
         Self {
             db: LifebotDb::new(db_path),
             demo_mode,
@@ -496,6 +496,11 @@ impl LifebotService {
         })
     }
 
+    /// Returns true if this integration key holds a credential (should use keyring).
+    fn is_credential_key(key: &str) -> bool {
+        key.contains("api_key") || key.contains("token") || key.contains("secret") || key.contains("password")
+    }
+
     pub fn get_integrations(&self) -> Result<Vec<IntegrationStatus>> {
         let conn = self.db.connect()?;
         let integrations = vec![
@@ -506,13 +511,18 @@ impl LifebotService {
         ];
         let mut result = Vec::new();
         for (key, label, description) in integrations {
-            let value: String = conn
-                .query_row(
+            let value: String = if Self::is_credential_key(key) {
+                keyring::Entry::new("lifebot", &format!("integration-{}", key))
+                    .and_then(|e| e.get_password())
+                    .unwrap_or_default()
+            } else {
+                conn.query_row(
                     "SELECT value FROM app_settings WHERE key = ?1",
                     params![key],
                     |row| row.get(0),
                 )
-                .unwrap_or_default();
+                .unwrap_or_default()
+            };
             result.push(IntegrationStatus {
                 key: key.into(),
                 label: label.into(),
@@ -529,19 +539,31 @@ impl LifebotService {
         if !allowed.contains(&key) {
             anyhow::bail!("Unknown integration key: {}", key);
         }
-        let conn = self.db.connect()?;
-        conn.execute(
-            "INSERT INTO app_settings (key, value) VALUES (?1, ?2)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params![key, value],
-        )?;
+        if Self::is_credential_key(key) {
+            keyring::Entry::new("lifebot", &format!("integration-{}", key))
+                .and_then(|e| e.set_password(value))
+                .map_err(|e| anyhow::anyhow!("Keyring error: {}", e))?;
+        } else {
+            let conn = self.db.connect()?;
+            conn.execute(
+                "INSERT INTO app_settings (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![key, value],
+            )?;
+        }
         self.log_message("in_app", &format!("Integration '{}' updated.", key))?;
         Ok(())
     }
 
     pub fn disconnect_integration(&self, key: &str) -> Result<()> {
-        let conn = self.db.connect()?;
-        conn.execute("DELETE FROM app_settings WHERE key = ?1", params![key])?;
+        if Self::is_credential_key(key) {
+            if let Ok(entry) = keyring::Entry::new("lifebot", &format!("integration-{}", key)) {
+                let _ = entry.delete_credential();
+            }
+        } else {
+            let conn = self.db.connect()?;
+            conn.execute("DELETE FROM app_settings WHERE key = ?1", params![key])?;
+        }
         self.log_message("in_app", &format!("Integration '{}' disconnected.", key))?;
         Ok(())
     }
@@ -681,14 +703,6 @@ impl LifebotService {
             )
             .unwrap_or_else(|_| "uninitialized".to_string());
 
-        let sling_token: String = conn
-            .query_row(
-                "SELECT value FROM app_settings WHERE key = 'sling_token'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap_or_default();
-
         let last_import: Option<String> = conn
             .query_row(
                 "SELECT completed_at FROM import_runs ORDER BY completed_at DESC LIMIT 1",
@@ -703,7 +717,7 @@ impl LifebotService {
 
         Ok(SetupStatus {
             app_mode,
-            sling_connected: !sling_token.is_empty(),
+            sling_connected: self.get_sling_token().is_ok(),
             last_import,
             guard_count,
             site_count,
@@ -715,8 +729,8 @@ impl LifebotService {
     pub fn init_app_mode(&self, mode: &str) -> Result<()> {
         let conn = self.db.connect()?;
         conn.execute(
-            "INSERT INTO app_settings (key, value) VALUES ('app_mode', ?1)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            "INSERT INTO app_settings (key, value, updated_at) VALUES ('app_mode', ?1, datetime('now'))
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')",
             params![mode],
         )?;
         if mode == "demo" {
@@ -726,25 +740,45 @@ impl LifebotService {
         Ok(())
     }
 
-    /// Store Sling session credentials and set app_mode to "live".
+    /// Store Sling session credentials securely and set app_mode to "live".
+    /// The token is stored in the OS keychain (macOS Keychain, Windows
+    /// Credential Manager, Linux Secret Service). Only the org_id and
+    /// connection status go into SQLite.
     pub fn store_sling_session(&self, token: &str, org_id: i64) -> Result<()> {
+        // Store token in OS keychain — never in the database
+        let entry = keyring::Entry::new("lifebot", "sling-token")
+            .context("Failed to access OS keychain")?;
+        entry
+            .set_password(token)
+            .context("Failed to store Sling token in OS keychain")?;
+
+        // Store non-secret metadata in DB
         let conn = self.db.connect()?;
         conn.execute(
-            "INSERT INTO app_settings (key, value) VALUES ('sling_token', ?1)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params![token],
-        )?;
-        conn.execute(
-            "INSERT INTO app_settings (key, value) VALUES ('sling_org_id', ?1)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            "INSERT INTO app_settings (key, value, updated_at) VALUES ('sling_org_id', ?1, datetime('now'))
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')",
             params![org_id.to_string()],
         )?;
         conn.execute(
-            "INSERT INTO app_settings (key, value) VALUES ('app_mode', 'live')
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            "INSERT INTO app_settings (key, value, updated_at) VALUES ('sling_connected', 'true', datetime('now'))
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO app_settings (key, value, updated_at) VALUES ('app_mode', 'live', datetime('now'))
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')",
             [],
         )?;
         Ok(())
+    }
+
+    /// Retrieve the Sling token from the OS keychain.
+    pub fn get_sling_token(&self) -> Result<String> {
+        let entry = keyring::Entry::new("lifebot", "sling-token")
+            .context("Failed to access OS keychain")?;
+        entry
+            .get_password()
+            .context("No Sling token found in OS keychain — please reconnect")
     }
 
     /// Map Sling API data through the mapping layer, upsert into the DB, and

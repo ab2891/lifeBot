@@ -30,9 +30,10 @@ struct AppError(anyhow::Error);
 
 impl IntoResponse for AppError {
     fn into_response(self) -> axum::response::Response {
+        eprintln!("Internal error: {}", self.0);
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": self.0.to_string() })),
+            Json(serde_json::json!({ "error": "An internal error occurred" })),
         )
             .into_response()
     }

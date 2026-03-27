@@ -27,6 +27,15 @@ impl LifebotDb {
     pub fn connect(&self) -> Result<Connection> {
         let conn = Connection::open(&self.path)?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(metadata) = std::fs::metadata(&self.path) {
+                let mut perms = metadata.permissions();
+                perms.set_mode(0o600);
+                let _ = std::fs::set_permissions(&self.path, perms);
+            }
+        }
         Ok(conn)
     }
 
@@ -64,10 +73,15 @@ pub fn migrate_conn(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+const ALLOWED_TABLES: &[&str] = &["guards", "sites", "roles", "shifts"];
+const ALLOWED_COLUMNS: &[&str] = &["sling_id", "sling_shift_id"];
+
 /// Add a column to a table only if it does not already exist.
 /// SQLite does not support `ALTER TABLE … ADD COLUMN IF NOT EXISTS`, so we
 /// inspect PRAGMA table_info first.
 fn ensure_column(conn: &Connection, table: &str, column: &str, col_type: &str) -> Result<()> {
+    assert!(ALLOWED_TABLES.contains(&table), "Invalid table name: {}", table);
+    assert!(ALLOWED_COLUMNS.contains(&column), "Invalid column name: {}", column);
     let has_column: bool = conn
         .prepare(&format!("PRAGMA table_info({table})"))?
         .query_map([], |row| row.get::<_, String>(1))?

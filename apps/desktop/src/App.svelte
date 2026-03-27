@@ -162,6 +162,7 @@
     busy = true;
     try {
       await api.slingConnect(slingEmail, slingPassword);
+      slingPassword = '';
       setupStep = 'sling-import';
     } catch (err) {
       setupError = err instanceof Error ? err.message : "Failed to connect to Sling.";
