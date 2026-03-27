@@ -340,6 +340,16 @@ pub fn simulate_event(
     confidence: f64,
     duration_secs: f64,
 ) -> Result<SentinelAlert> {
+    // Rate limit: max 1 simulation per 10 seconds per zone
+    let recent: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sentinel_events WHERE zone_id = ?1 AND detected_at > datetime('now', '-10 seconds')",
+        params![zone_id],
+        |r| r.get(0),
+    )?;
+    if recent > 0 {
+        anyhow::bail!("Rate limited: please wait before simulating another event for this zone");
+    }
+
     // Look up zone info
     let (zone_name, pool_id, zone_type, camera_id): (String, String, String, Option<String>) = conn.query_row(
         "SELECT pz.name, pz.pool_id, pz.zone_type, pz.camera_id FROM pool_zones pz WHERE pz.id = ?1",

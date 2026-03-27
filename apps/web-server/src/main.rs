@@ -13,7 +13,6 @@ use tower_http::{
     services::{ServeDir, ServeFile},
 };
 
-use lifebot_assistant_tools::AssistantTools;
 use lifebot_core::LifebotService;
 
 // ---------------------------------------------------------------------------
@@ -231,9 +230,17 @@ async fn assistant_query(
     State(svc): State<AppState>,
     Json(body): Json<QueryBody>,
 ) -> ApiResult<serde_json::Value> {
-    let tools = AssistantTools::new((*svc).clone());
+    // Safety: the assistant must never directly approve schedules.
+    // If the user asks to approve, instruct them to use the UI button.
     if body.query.to_lowercase().contains("approve") {
-        tools.approve_draft_schedule()?;
+        use lifebot_core::models::AssistantResponse;
+        let response = AssistantResponse {
+            tool: "approve_draft".into(),
+            title: "Approve Draft Schedule".into(),
+            explanation: "To approve the draft schedule, use the 'Approve Draft' button in the top bar.".into(),
+            data: serde_json::Value::Null,
+        };
+        return Ok(Json(serde_json::to_value(response)?));
     }
     Ok(Json(serde_json::to_value(
         svc.run_assistant_query(&body.query)?,

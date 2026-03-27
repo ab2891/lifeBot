@@ -10,9 +10,9 @@ pub struct AppState {
 mod commands {
     use std::env;
 
-    use lifebot_assistant_tools::AssistantTools;
     use lifebot_sling::SlingClient;
     use lifebot_core::models::{ImportRunResult, SetupStatus, SlingExportResult};
+    use lifebot_core::validate;
     use serde::Serialize;
     use tauri::{Manager, State};
 
@@ -151,6 +151,8 @@ mod commands {
         notes: String,
         state: State<AppState>,
     ) -> Result<(), String> {
+        validate::validate_sentinel_action(&action).map_err(|e| e.to_string())?;
+        validate::validate_length(&notes, "notes", 5000).map_err(|e| e.to_string())?;
         with_service(&state, |service| {
             service.sentinel_acknowledge(&alert_id, &guard_id, &action, &notes)
         })
@@ -163,11 +165,15 @@ mod commands {
 
     #[tauri::command]
     pub fn sentinel_add_camera(site_id: String, name: String, location: String, stream_url: String, state: State<AppState>) -> Result<impl Serialize, String> {
+        validate::validate_length(&name, "name", 200).map_err(|e| e.to_string())?;
+        validate::validate_url(&stream_url, "stream_url").map_err(|e| e.to_string())?;
         with_service(&state, |service| service.sentinel_add_camera(&site_id, &name, &location, &stream_url))
     }
 
     #[tauri::command]
     pub fn sentinel_update_camera(camera_id: String, name: String, location: String, stream_url: String, active: bool, state: State<AppState>) -> Result<(), String> {
+        validate::validate_length(&name, "name", 200).map_err(|e| e.to_string())?;
+        validate::validate_url(&stream_url, "stream_url").map_err(|e| e.to_string())?;
         with_service(&state, |service| service.sentinel_update_camera(&camera_id, &name, &location, &stream_url, active))
     }
 
@@ -219,9 +225,15 @@ mod commands {
         state: State<AppState>,
     ) -> Result<impl Serialize, String> {
         with_service(&state, |service| {
-            let tools = AssistantTools::new(service.clone());
+            // Safety: the assistant must never directly approve schedules.
+            // If the user asks to approve, instruct them to use the UI button.
             if query.to_lowercase().contains("approve") {
-                tools.approve_draft_schedule()?;
+                return Ok(lifebot_core::models::AssistantResponse {
+                    tool: "approve_draft".into(),
+                    title: "Approve Draft Schedule".into(),
+                    explanation: "To approve the draft schedule, use the 'Approve Draft' button in the top bar.".into(),
+                    data: serde_json::Value::Null,
+                });
             }
             service.run_assistant_query(&query)
         })
@@ -263,6 +275,10 @@ mod commands {
         cycle_name: String,
         state: State<'_, AppState>,
     ) -> Result<ImportRunResult, String> {
+        validate::validate_date(&date_from, "date_from").map_err(|e| e.to_string())?;
+        validate::validate_date(&date_to, "date_to").map_err(|e| e.to_string())?;
+        validate::validate_date_range(&date_from, &date_to).map_err(|e| e.to_string())?;
+        validate::validate_length(&cycle_name, "cycle_name", 100).map_err(|e| e.to_string())?;
         // Read stored credentials from DB
         let (token, org_id) = {
             let guard = state
@@ -367,6 +383,10 @@ mod commands {
         rollover_deadline: String,
         state: State<AppState>,
     ) -> Result<String, String> {
+        validate::validate_length(&name, "name", 100).map_err(|e| e.to_string())?;
+        validate::validate_date(&starts_on, "starts_on").map_err(|e| e.to_string())?;
+        validate::validate_date(&ends_on, "ends_on").map_err(|e| e.to_string())?;
+        validate::validate_date_range(&starts_on, &ends_on).map_err(|e| e.to_string())?;
         with_service(&state, |service| {
             service.create_cycle(&name, &starts_on, &ends_on, &rollover_deadline)
         })
