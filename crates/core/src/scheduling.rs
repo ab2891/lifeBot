@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use chrono::{Datelike, NaiveDate, NaiveDateTime, Utc};
 use lifebot_policies::{
     evaluate_candidate, ExistingAssignment, GuardContext, PolicyConfig, PolicyInput, ShiftContext,
@@ -9,34 +9,54 @@ use serde_json::json;
 use crate::models::{CandidateRequest, TemplateContext};
 
 pub fn generate_next_cycle_draft(conn: &Connection) -> Result<()> {
-    let next_cycle_id = "cycle-next";
-    let next_exists: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM shifts WHERE cycle_id = ?1",
-        params![next_cycle_id],
-        |row| row.get(0),
-    )?;
+    // Look up the draft cycle dynamically — bail with a clear error if none exists.
+    let draft_cycle: Option<(String, String, String)> = conn
+        .query_row(
+            "SELECT id, starts_on, rollover_deadline FROM scheduling_cycles WHERE status = 'draft' LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .ok();
+
+    let (next_cycle_id, cycle_starts_on, cycle_rollover_deadline) = match draft_cycle {
+        Some(row) => row,
+        None => anyhow::bail!(
+            "No draft scheduling cycle found. Create a scheduling cycle with status = 'draft' before generating a draft."
+        ),
+    };
+
+    let next_exists: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM shifts WHERE cycle_id = ?1",
+            params![next_cycle_id],
+            |row| row.get(0),
+        )
+        .context("Failed to count existing shifts for the draft cycle")?;
+
     if next_exists > 0 {
-        conn.execute("DELETE FROM decision_traces WHERE cycle_id = ?1", params![next_cycle_id])?;
-        conn.execute("DELETE FROM shift_assignments WHERE shift_id IN (SELECT id FROM shifts WHERE cycle_id = ?1)", params![next_cycle_id])?;
-        conn.execute("DELETE FROM shifts WHERE cycle_id = ?1", params![next_cycle_id])?;
-        conn.execute("UPDATE shift_requests SET status = 'queued', reason = NULL WHERE cycle_id = ?1", params![next_cycle_id])?;
+        conn.execute("DELETE FROM decision_traces WHERE cycle_id = ?1", params![next_cycle_id])
+            .context("Failed to clear previous decision traces for the draft cycle")?;
+        conn.execute("DELETE FROM shift_assignments WHERE shift_id IN (SELECT id FROM shifts WHERE cycle_id = ?1)", params![next_cycle_id])
+            .context("Failed to clear previous shift assignments for the draft cycle")?;
+        conn.execute("DELETE FROM shifts WHERE cycle_id = ?1", params![next_cycle_id])
+            .context("Failed to clear previous shifts for the draft cycle")?;
+        conn.execute("UPDATE shift_requests SET status = 'queued', reason = NULL WHERE cycle_id = ?1", params![next_cycle_id])
+            .context("Failed to reset shift request statuses for the draft cycle")?;
     }
 
-    let cycle: (String, String) = conn.query_row(
-        "SELECT starts_on, rollover_deadline FROM scheduling_cycles WHERE id = ?1",
-        params![next_cycle_id],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )?;
-    let next_cycle_start = NaiveDate::parse_from_str(&cycle.0, "%Y-%m-%d")?;
-    let rollover_deadline = NaiveDateTime::parse_from_str(&cycle.1, "%Y-%m-%d %H:%M:%S")?;
+    let next_cycle_start = NaiveDate::parse_from_str(&cycle_starts_on, "%Y-%m-%d")
+        .context("Failed to parse draft cycle starts_on date")?;
+    let rollover_deadline = NaiveDateTime::parse_from_str(&cycle_rollover_deadline, "%Y-%m-%d %H:%M:%S")
+        .context("Failed to parse draft cycle rollover_deadline")?;
 
     for template in load_templates(conn)? {
         let shift_id = format!("shift-next-{}", template.template_id);
         let shift_date = next_date_for_day(next_cycle_start, &template.day_of_week)?;
         conn.execute(
-            "INSERT INTO shifts (id, template_id, cycle_id, shift_date, status) VALUES (?1, ?2, 'cycle-next', ?3, 'draft')",
-            params![shift_id, template.template_id, shift_date.to_string()],
-        )?;
+            "INSERT INTO shifts (id, template_id, cycle_id, shift_date, status) VALUES (?1, ?2, ?3, ?4, 'draft')",
+            params![shift_id, template.template_id, next_cycle_id, shift_date.to_string()],
+        )
+        .context("Failed to insert draft shift")?;
 
         let mut trace_steps = Vec::new();
         let mut winner: Option<String> = None;
@@ -87,7 +107,13 @@ pub fn generate_next_cycle_draft(conn: &Connection) -> Result<()> {
         }
 
         if winner.is_none() {
-            let requests = load_requests_for_template(conn, &template.template_id)?;
+            let requests = load_requests_for_template(conn, &template.template_id, &next_cycle_id)?;
+            if requests.is_empty() {
+                trace_steps.push(json!({
+                    "type": "no_requests",
+                    "reason": "No requests received for this shift"
+                }));
+            }
             for request in requests {
                 match evaluate_eligibility(conn, &request.guard_id, &template, &shift_date, &shift_id) {
                     Ok(()) => {
@@ -99,7 +125,8 @@ pub fn generate_next_cycle_draft(conn: &Connection) -> Result<()> {
                         conn.execute(
                             "UPDATE shift_requests SET status = 'accepted', reason = ?2 WHERE id = ?1",
                             params![request.request_id, winner_reason],
-                        )?;
+                        )
+                        .context("Failed to mark shift request as accepted")?;
                         trace_steps.push(json!({
                             "type": "request_awarded",
                             "guard": request.guard_name,
@@ -112,7 +139,8 @@ pub fn generate_next_cycle_draft(conn: &Connection) -> Result<()> {
                         conn.execute(
                             "UPDATE shift_requests SET status = 'skipped', reason = ?2 WHERE id = ?1",
                             params![request.request_id, reason.to_string()],
-                        )?;
+                        )
+                        .context("Failed to mark shift request as skipped")?;
                         trace_steps.push(json!({
                             "type": "request_skipped",
                             "guard": request.guard_name,
@@ -145,9 +173,10 @@ pub fn generate_next_cycle_draft(conn: &Connection) -> Result<()> {
 
         conn.execute(
             "INSERT INTO decision_traces (id, cycle_id, shift_id, decision_type, summary, payload_json, decided_at)
-             VALUES (?1, 'cycle-next', ?2, 'assignment_decision', ?3, ?4, ?5)",
+             VALUES (?1, ?2, ?3, 'assignment_decision', ?4, ?5, ?6)",
             params![
                 format!("trace-{shift_id}"),
+                next_cycle_id,
                 shift_id,
                 summary,
                 json!({
@@ -158,13 +187,15 @@ pub fn generate_next_cycle_draft(conn: &Connection) -> Result<()> {
                 .to_string(),
                 Utc::now().naive_utc().to_string()
             ],
-        )?;
+        )
+        .context("Failed to insert decision trace")?;
     }
 
     conn.execute(
-        "UPDATE scheduling_cycles SET status = 'draft_ready' WHERE id = 'cycle-next'",
-        [],
-    )?;
+        "UPDATE scheduling_cycles SET status = 'draft_ready' WHERE id = ?1",
+        params![next_cycle_id],
+    )
+    .context("Failed to update scheduling cycle status to draft_ready")?;
 
     Ok(())
 }
@@ -231,15 +262,15 @@ fn load_templates(conn: &Connection) -> Result<Vec<TemplateContext>> {
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-fn load_requests_for_template(conn: &Connection, template_id: &str) -> Result<Vec<CandidateRequest>> {
+fn load_requests_for_template(conn: &Connection, template_id: &str, cycle_id: &str) -> Result<Vec<CandidateRequest>> {
     let mut stmt = conn.prepare(
         "SELECT sr.id, g.id, g.name, sr.requested_at
          FROM shift_requests sr
          JOIN guards g ON g.id = sr.guard_id
-         WHERE sr.shift_template_id = ?1 AND sr.cycle_id = 'cycle-next'
+         WHERE sr.shift_template_id = ?1 AND sr.cycle_id = ?2
          ORDER BY sr.requested_at ASC"
     )?;
-    let rows = stmt.query_map(params![template_id], |row| {
+    let rows = stmt.query_map(params![template_id, cycle_id], |row| {
         let requested_at: String = row.get(3)?;
         Ok(CandidateRequest {
             request_id: row.get(0)?,
