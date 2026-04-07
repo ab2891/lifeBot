@@ -19,6 +19,7 @@ tauri = { version = "2.0.0", features = [] }
 lifebot-core = { path = "../../../crates/core" }
 lifebot-assistant-tools = { path = "../../../packages/assistant-tools" }
 lifebot-openclaw-adapter = { path = "../../../packages/openclaw-adapter" }
+lifebot-sling = { path = "../../../packages/providers/sling" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 webkit2gtk = { version = "2.0.2", features = ["v2_16"] }

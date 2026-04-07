@@ -53,6 +53,11 @@ impl MessageProvider for FakeGroupMeProvider {
 }
 
 pub fn log_message(conn: &Connection, provider_name: &str, recipient: &str, body: &str) -> Result<()> {
+    let truncated_body = if body.len() > 500 {
+        format!("{}... [truncated]", &body[..500])
+    } else {
+        body.to_string()
+    };
     conn.execute(
         "INSERT INTO message_log (id, provider_name, recipient, body, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -60,7 +65,7 @@ pub fn log_message(conn: &Connection, provider_name: &str, recipient: &str, body
             format!("msg-{}", uuid::Uuid::new_v4()),
             provider_name,
             recipient,
-            body,
+            truncated_body,
             Utc::now().naive_utc().to_string()
         ],
     )?;

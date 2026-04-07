@@ -10,7 +10,9 @@ pub struct AppState {
 mod commands {
     use std::env;
 
-    use lifebot_assistant_tools::AssistantTools;
+    use lifebot_sling::SlingClient;
+    use lifebot_core::models::{ImportRunResult, SetupStatus, SlingExportResult};
+    use lifebot_core::validate;
     use serde::Serialize;
     use tauri::{Manager, State};
 
@@ -149,6 +151,8 @@ mod commands {
         notes: String,
         state: State<AppState>,
     ) -> Result<(), String> {
+        validate::validate_sentinel_action(&action).map_err(|e| e.to_string())?;
+        validate::validate_length(&notes, "notes", 5000).map_err(|e| e.to_string())?;
         with_service(&state, |service| {
             service.sentinel_acknowledge(&alert_id, &guard_id, &action, &notes)
         })
@@ -161,11 +165,15 @@ mod commands {
 
     #[tauri::command]
     pub fn sentinel_add_camera(site_id: String, name: String, location: String, stream_url: String, state: State<AppState>) -> Result<impl Serialize, String> {
+        validate::validate_length(&name, "name", 200).map_err(|e| e.to_string())?;
+        validate::validate_url(&stream_url, "stream_url").map_err(|e| e.to_string())?;
         with_service(&state, |service| service.sentinel_add_camera(&site_id, &name, &location, &stream_url))
     }
 
     #[tauri::command]
     pub fn sentinel_update_camera(camera_id: String, name: String, location: String, stream_url: String, active: bool, state: State<AppState>) -> Result<(), String> {
+        validate::validate_length(&name, "name", 200).map_err(|e| e.to_string())?;
+        validate::validate_url(&stream_url, "stream_url").map_err(|e| e.to_string())?;
         with_service(&state, |service| service.sentinel_update_camera(&camera_id, &name, &location, &stream_url, active))
     }
 
@@ -217,12 +225,176 @@ mod commands {
         state: State<AppState>,
     ) -> Result<impl Serialize, String> {
         with_service(&state, |service| {
-            let tools = AssistantTools::new(service.clone());
+            // Safety: the assistant must never directly approve schedules.
+            // If the user asks to approve, instruct them to use the UI button.
             if query.to_lowercase().contains("approve") {
-                tools.approve_draft_schedule()?;
+                return Ok(lifebot_core::models::AssistantResponse {
+                    tool: "approve_draft".into(),
+                    title: "Approve Draft Schedule".into(),
+                    explanation: "To approve the draft schedule, use the 'Approve Draft' button in the top bar.".into(),
+                    data: serde_json::Value::Null,
+                });
             }
             service.run_assistant_query(&query)
         })
+    }
+
+    // --- Sling integration ---
+
+    #[tauri::command]
+    pub fn get_setup_status(state: State<AppState>) -> Result<SetupStatus, String> {
+        with_service(&state, |service| service.setup_status())
+    }
+
+    #[tauri::command]
+    pub fn init_app_mode(mode: String, state: State<AppState>) -> Result<(), String> {
+        with_service(&state, |service| service.init_app_mode(&mode))
+    }
+
+    #[tauri::command]
+    pub async fn sling_connect(
+        email: String,
+        password: String,
+        state: State<'_, AppState>,
+    ) -> Result<String, String> {
+        let client = SlingClient::login(&email, &password)
+            .await
+            .map_err(|e| e.to_string())?;
+        let token = client.token().to_string();
+        let org_id = client.org_id();
+        with_service(&state, |service| {
+            service.store_sling_session(&token, org_id)
+        })?;
+        Ok(format!("Connected to Sling (org_id={})", org_id))
+    }
+
+    #[tauri::command]
+    pub async fn sling_import(
+        date_from: String,
+        date_to: String,
+        cycle_name: String,
+        state: State<'_, AppState>,
+    ) -> Result<ImportRunResult, String> {
+        validate::validate_date(&date_from, "date_from").map_err(|e| e.to_string())?;
+        validate::validate_date(&date_to, "date_to").map_err(|e| e.to_string())?;
+        validate::validate_date_range(&date_from, &date_to).map_err(|e| e.to_string())?;
+        validate::validate_length(&cycle_name, "cycle_name", 100).map_err(|e| e.to_string())?;
+        // Read stored credentials from DB
+        let (token, org_id) = {
+            let guard = state
+                .service
+                .lock()
+                .map_err(|_| "Unable to lock app state".to_string())?;
+            let service = guard
+                .as_ref()
+                .ok_or_else(|| "Lifebot service is not initialized".to_string())?;
+            let token = service.get_sling_token().map_err(|e| e.to_string())?;
+            let conn = service.db().connect().map_err(|e| e.to_string())?;
+            let org_id_str: String = conn
+                .query_row(
+                    "SELECT value FROM app_settings WHERE key = 'sling_org_id'",
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            let org_id: i64 = org_id_str
+                .parse()
+                .map_err(|e: std::num::ParseIntError| e.to_string())?;
+            drop(conn);
+            (token, org_id)
+        };
+
+        // Fetch data from Sling
+        let sling = SlingClient::from_token(token, org_id);
+        let dates = format!("{}T00:00:00Z/{}T23:59:59Z", date_from, date_to);
+        let users = sling.fetch_users().await.map_err(|e| e.to_string())?;
+        let groups = sling.fetch_groups().await.map_err(|e| e.to_string())?;
+        let shifts = sling.fetch_shifts(&dates).await.map_err(|e| e.to_string())?;
+
+        // Create cycle and run import
+        with_service(&state, |service| {
+            let cycle_id = service.create_cycle(
+                &cycle_name,
+                &date_from,
+                &date_to,
+                &date_to, // rollover_deadline defaults to end date
+            )?;
+            service.run_import(users, groups, shifts, &cycle_id)
+        })
+    }
+
+    #[tauri::command]
+    pub async fn sling_export(
+        cycle_id: String,
+        state: State<'_, AppState>,
+    ) -> Result<SlingExportResult, String> {
+        // Build the list of shift payloads from the service layer.
+        let shifts = with_service(&state, |service| service.build_sling_export(&cycle_id))?;
+
+        if shifts.is_empty() {
+            return Ok(SlingExportResult {
+                shifts_exported: 0,
+                errors: vec!["No reviewed or accepted assignments found for this cycle.".to_string()],
+            });
+        }
+
+        // Read stored Sling credentials.
+        let (token, org_id) = {
+            let guard = state
+                .service
+                .lock()
+                .map_err(|_| "Unable to lock app state".to_string())?;
+            let service = guard
+                .as_ref()
+                .ok_or_else(|| "Lifebot service is not initialized".to_string())?;
+            let token = service.get_sling_token().map_err(|e| e.to_string())?;
+            let conn = service.db().connect().map_err(|e| e.to_string())?;
+            let org_id_str: String = conn
+                .query_row(
+                    "SELECT value FROM app_settings WHERE key = 'sling_org_id'",
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            let org_id: i64 = org_id_str
+                .parse()
+                .map_err(|e: std::num::ParseIntError| e.to_string())?;
+            drop(conn);
+            (token, org_id)
+        };
+
+        let client = SlingClient::from_token(token, org_id);
+        client
+            .create_shifts(&shifts)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        Ok(SlingExportResult {
+            shifts_exported: shifts.len(),
+            errors: vec![],
+        })
+    }
+
+    #[tauri::command]
+    pub fn create_scheduling_cycle(
+        name: String,
+        starts_on: String,
+        ends_on: String,
+        rollover_deadline: String,
+        state: State<AppState>,
+    ) -> Result<String, String> {
+        validate::validate_length(&name, "name", 100).map_err(|e| e.to_string())?;
+        validate::validate_date(&starts_on, "starts_on").map_err(|e| e.to_string())?;
+        validate::validate_date(&ends_on, "ends_on").map_err(|e| e.to_string())?;
+        validate::validate_date_range(&starts_on, &ends_on).map_err(|e| e.to_string())?;
+        with_service(&state, |service| {
+            service.create_cycle(&name, &starts_on, &ends_on, &rollover_deadline)
+        })
+    }
+
+    #[tauri::command]
+    pub fn reseed_demo(state: State<AppState>) -> Result<(), String> {
+        with_service(&state, |service| service.init_app_mode("demo"))
     }
 }
 
@@ -280,7 +452,14 @@ pub fn run() {
             commands::sentinel_run_detection,
             commands::get_integrations,
             commands::save_integration,
-            commands::disconnect_integration
+            commands::disconnect_integration,
+            commands::get_setup_status,
+            commands::init_app_mode,
+            commands::sling_connect,
+            commands::sling_import,
+            commands::sling_export,
+            commands::create_scheduling_cycle,
+            commands::reseed_demo
         ])
         .run(tauri::generate_context!())
         .expect("error while running Lifebot desktop");

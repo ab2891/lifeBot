@@ -6,14 +6,17 @@ import type {
   DecisionTraceDetail,
   DecisionTraceSummary,
   GuardProfile,
+  ImportRunResult,
   IntegrationStatus,
   PolicyViolationView,
   PoolZone,
   SentinelAlert,
   SentinelDashboard,
   SentinelEvent,
+  SetupStatus,
   ShiftAssignmentView,
-  ShiftQueueEntry
+  ShiftQueueEntry,
+  SlingExportResult
 } from "@lifebot/shared-types";
 
 // Detect Tauri environment
@@ -215,4 +218,36 @@ export const api = {
     isTauri
       ? tauriInvoke<SentinelAlert[]>("sentinel_run_detection")
       : fetchJson<SentinelAlert[]>("/api/sentinel/cv/detect", { method: "POST" }),
+
+  // --- Setup / Sling onboarding ---
+
+  getSetupStatus: () =>
+    isTauri
+      ? tauriInvoke<SetupStatus>("get_setup_status")
+      : fetchJson<SetupStatus>("/api/setup/status"),
+
+  initAppMode: (mode: string) =>
+    isTauri
+      ? tauriInvoke<void>("init_app_mode", { mode })
+      : fetchJson<void>("/api/setup/mode", { method: "POST", body: JSON.stringify({ mode }) }),
+
+  slingConnect: (email: string, password: string) =>
+    isTauri
+      ? tauriInvoke<string>("sling_connect", { email, password })
+      : fetchJson<string>("/api/sling/connect", { method: "POST", body: JSON.stringify({ email, password }) }),
+
+  slingImport: (dateFrom: string, dateTo: string, cycleName: string) =>
+    isTauri
+      ? tauriInvoke<ImportRunResult>("sling_import", { dateFrom, dateTo, cycleName })
+      : fetchJson<ImportRunResult>("/api/sling/import", { method: "POST", body: JSON.stringify({ dateFrom, dateTo, cycleName }) }),
+
+  slingExport: (cycleId: string) =>
+    isTauri
+      ? tauriInvoke<SlingExportResult>("sling_export", { cycleId })
+      : fetchJson<SlingExportResult>("/api/sling/export", { method: "POST", body: JSON.stringify({ cycleId }) }),
+
+  reseedDemo: () =>
+    isTauri
+      ? tauriInvoke<void>("reseed_demo")
+      : fetchJson<void>("/api/setup/demo", { method: "POST" }),
 };

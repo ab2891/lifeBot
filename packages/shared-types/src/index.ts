@@ -158,3 +158,26 @@ export type AssistantResponse = {
   explanation: string;
   data: unknown;
 };
+
+export interface SetupStatus {
+  app_mode: string;
+  sling_connected: boolean;
+  last_import: string | null;
+  guard_count: number;
+  site_count: number;
+  template_count: number;
+}
+
+export interface ImportRunResult {
+  guards_imported: number;
+  guards_updated: number;
+  sites_imported: number;
+  positions_imported: number;
+  shifts_imported: number;
+  errors: string[];
+}
+
+export interface SlingExportResult {
+  shifts_exported: number;
+  errors: string[];
+}

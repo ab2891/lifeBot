@@ -9,9 +9,12 @@
     "frontendDist": "../dist"
   },
   "app": {
+    "security": {
+      "csp": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://api.getsling.com"
+    },
     "windows": [
       {
-        "title": "Lifebot MVP 1",
+        "title": "Lifebot",
         "width": 1440,
         "height": 980,
         "resizable": true
@@ -21,6 +24,13 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": []
+    "icon": [
+        "icons/icon.png",
+        "icons/32x32.png",
+        "icons/128x128.png",
+        "icons/128x128@2x.png",
+        "icons/icon.icns",
+        "icons/icon.ico"
+      ]
   }
 }

@@ -124,6 +124,32 @@ pub struct IntegrationStatus {
     pub description: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetupStatus {
+    pub app_mode: String,       // "uninitialized", "demo", "live"
+    pub sling_connected: bool,
+    pub last_import: Option<String>,
+    pub guard_count: i64,
+    pub site_count: i64,
+    pub template_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportRunResult {
+    pub guards_imported: usize,
+    pub guards_updated: usize,
+    pub sites_imported: usize,
+    pub positions_imported: usize,
+    pub shifts_imported: usize,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SlingExportResult {
+    pub shifts_exported: usize,
+    pub errors: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct SchedulingCycleRecord {
     pub id: String,

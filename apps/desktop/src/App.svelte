@@ -9,14 +9,17 @@
     DecisionTraceDetail,
     DecisionTraceSummary,
     GuardProfile,
+    ImportRunResult,
     IntegrationStatus,
     PolicyViolationView,
     PoolZone,
     SentinelAlert,
     SentinelDashboard,
     SentinelEvent,
+    SetupStatus,
     ShiftAssignmentView,
-    ShiftQueueEntry
+    ShiftQueueEntry,
+    SlingExportResult
   } from "@lifebot/shared-types";
 
   type Tab =
@@ -47,6 +50,19 @@
   let activeTab: Tab = "dashboard";
   let loading = true;
   let busy = false;
+
+  // Setup wizard state
+  let setupStatus: SetupStatus | null = null;
+  let setupStep: 'choose' | 'sling-login' | 'sling-import' | 'done' = 'choose';
+  let slingEmail = '';
+  let slingPassword = '';
+  let importDateFrom = '';
+  let importDateTo = '';
+  let importCycleName = '';
+  let importResult: ImportRunResult | null = null;
+  let exportResult: SlingExportResult | null = null;
+  let exportMessage = '';
+  let setupError = '';
   let dashboard: DashboardData | null = null;
   let guards: GuardProfile[] = [];
   let shifts: ShiftAssignmentView[] = [];
@@ -79,6 +95,12 @@
     error = "";
     try {
       await api.bootstrap();
+      setupStatus = await api.getSetupStatus();
+      if (setupStatus.app_mode === "uninitialized") {
+        // Show setup wizard instead of main app
+        loading = false;
+        return;
+      }
       [
         dashboard,
         guards,
@@ -111,9 +133,59 @@
       }
       selectedTrace = traces[0] ? await api.traceDetail(traces[0].id) : null;
     } catch (err) {
-      error = err instanceof Error ? err.message : "Unable to load Lifebot demo data.";
+      error = err instanceof Error ? err.message : "Unable to load data.";
     } finally {
       loading = false;
+    }
+  }
+
+  async function setupChooseDemo() {
+    setupError = '';
+    busy = true;
+    try {
+      await api.initAppMode('demo');
+      setupStatus = await api.getSetupStatus();
+      await loadAll();
+    } catch (err) {
+      setupError = err instanceof Error ? err.message : "Failed to initialize demo mode.";
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function setupSlingConnect() {
+    setupError = '';
+    if (!slingEmail.trim() || !slingPassword.trim()) {
+      setupError = "Email and password are required.";
+      return;
+    }
+    busy = true;
+    try {
+      await api.slingConnect(slingEmail, slingPassword);
+      slingPassword = '';
+      setupStep = 'sling-import';
+    } catch (err) {
+      setupError = err instanceof Error ? err.message : "Failed to connect to Sling.";
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function setupSlingImport() {
+    setupError = '';
+    if (!importCycleName.trim() || !importDateFrom || !importDateTo) {
+      setupError = "Cycle name and date range are required.";
+      return;
+    }
+    busy = true;
+    try {
+      importResult = await api.slingImport(importDateFrom, importDateTo, importCycleName);
+      setupStatus = await api.getSetupStatus();
+      await loadAll();
+    } catch (err) {
+      setupError = err instanceof Error ? err.message : "Import failed.";
+    } finally {
+      busy = false;
     }
   }
 
@@ -138,6 +210,25 @@
       await api.approveDraft();
       dashboard = await api.dashboard();
       shifts = await api.shifts();
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function exportToSling() {
+    busy = true;
+    exportMessage = '';
+    exportResult = null;
+    try {
+      const result = await api.slingExport('cycle-next');
+      exportResult = result;
+      if (result.errors.length > 0) {
+        exportMessage = `Export completed with errors: ${result.errors.join('; ')}`;
+      } else {
+        exportMessage = `Exported ${result.shifts_exported} shift(s) to Sling successfully.`;
+      }
+    } catch (err) {
+      exportMessage = `Export failed: ${err instanceof Error ? err.message : String(err)}`;
     } finally {
       busy = false;
     }
@@ -182,8 +273,8 @@
   async function sentinelAction(alertId: string, action: string) {
     busy = true;
     try {
-      // Use first guard as actor for demo
-      const actorId = guards.length > 0 ? guards[0].id : "demo-user";
+      // Use first guard as actor
+      const actorId = guards.length > 0 ? guards[0].id : "unknown-user";
       const notes = action === "false_positive" ? "Marked as false positive" : action === "escalated" ? "Escalating to additional staff" : "";
       await api.sentinelAcknowledge(alertId, actorId, action, notes);
       await refreshSentinel();
@@ -283,7 +374,7 @@
 </script>
 
 <svelte:head>
-  <title>Lifebot MVP</title>
+  <title>Lifebot</title>
 </svelte:head>
 
 {#if loading}
@@ -294,6 +385,86 @@
       <h2>Lifebot could not start</h2>
       <p>{error}</p>
       <button on:click={loadAll}>Try again</button>
+    </div>
+  </div>
+{:else if setupStatus?.app_mode === 'uninitialized'}
+  <div class="splash">
+    <div class="setup-card">
+      <div class="setup-header">
+        <div class="eyebrow" style="color: #8fa8be;">Aquatics assistant</div>
+        <h1 style="font-size: 1.6rem; font-weight: 700; color: #1a2530; margin-top: 4px;">Welcome to Lifebot</h1>
+        <p style="margin-top: 8px; color: #6b7a8a; font-size: 0.9rem;">Choose how you'd like to get started.</p>
+      </div>
+
+      {#if setupError}
+        <div class="setup-error">{setupError}</div>
+      {/if}
+
+      {#if setupStep === 'choose'}
+        <div class="setup-choices">
+          <button class="setup-choice-btn setup-choice-primary" disabled={busy} on:click={() => { setupStep = 'sling-login'; setupError = ''; }}>
+            <strong>Connect to Sling</strong>
+            <span>Import your real guard schedules and staff data</span>
+          </button>
+          <button class="setup-choice-btn setup-choice-secondary" disabled={busy} on:click={setupChooseDemo}>
+            <strong>Try Demo Mode</strong>
+            <span>Explore with safe seeded data — no Sling account needed</span>
+          </button>
+        </div>
+      {/if}
+
+      {#if setupStep === 'sling-login'}
+        <div class="setup-form">
+          <p style="margin-bottom: 16px; color: #6b7a8a; font-size: 0.85rem;">Enter your Sling credentials. Lifebot will use these to fetch your schedule data.</p>
+          <label class="setup-label">Email
+            <input type="email" placeholder="your@email.com" bind:value={slingEmail} disabled={busy} />
+          </label>
+          <label class="setup-label">Password
+            <input type="password" placeholder="Sling password" bind:value={slingPassword} disabled={busy} />
+          </label>
+          <div class="setup-form-actions">
+            <button class="btn-primary" disabled={busy || !slingEmail.trim() || !slingPassword.trim()} on:click={setupSlingConnect}>
+              {busy ? 'Connecting…' : 'Connect'}
+            </button>
+            <button class="btn-secondary" disabled={busy} on:click={() => { setupStep = 'choose'; setupError = ''; }}>Back</button>
+          </div>
+        </div>
+      {/if}
+
+      {#if setupStep === 'sling-import'}
+        <div class="setup-form">
+          <p style="margin-bottom: 16px; color: #6b7a8a; font-size: 0.85rem;">Sling connected. Now import your schedule data for a date range.</p>
+          <label class="setup-label">Cycle name
+            <input type="text" placeholder="e.g. Summer 2026 Week 1" bind:value={importCycleName} disabled={busy} />
+          </label>
+          <div class="setup-date-row">
+            <label class="setup-label">From
+              <input type="date" bind:value={importDateFrom} disabled={busy} />
+            </label>
+            <label class="setup-label">To
+              <input type="date" bind:value={importDateTo} disabled={busy} />
+            </label>
+          </div>
+          {#if importResult}
+            <div class="setup-import-result">
+              <strong>Import complete</strong>
+              <ul>
+                <li>{importResult.guards_imported} guards imported, {importResult.guards_updated} updated</li>
+                <li>{importResult.sites_imported} sites, {importResult.positions_imported} positions, {importResult.shifts_imported} shifts</li>
+                {#if importResult.errors.length > 0}
+                  <li style="color: #dc2626;">{importResult.errors.length} error(s): {importResult.errors[0]}</li>
+                {/if}
+              </ul>
+            </div>
+          {/if}
+          <div class="setup-form-actions">
+            <button class="btn-primary" disabled={busy || !importCycleName.trim() || !importDateFrom || !importDateTo} on:click={setupSlingImport}>
+              {busy ? 'Importing…' : 'Import from Sling'}
+            </button>
+            <button class="btn-secondary" disabled={busy} on:click={() => { setupStep = 'sling-login'; setupError = ''; }}>Back</button>
+          </div>
+        </div>
+      {/if}
     </div>
   </div>
 {:else}
@@ -312,10 +483,12 @@
           >{tab.label}</button>
         {/each}
       </nav>
-      <div class="sidebar-note">
-        <strong>Demo mode</strong>
-        <p>Safe seeded data. No real Sling account required.</p>
-      </div>
+      {#if setupStatus?.app_mode === 'demo'}
+        <div class="sidebar-note">
+          <strong>Demo mode</strong>
+          <p>Safe seeded data. No real Sling account required.</p>
+        </div>
+      {/if}
     </div>
 
     <div class="main">
@@ -327,7 +500,15 @@
         <div class="topbar-actions">
           <button class="btn-primary" disabled={busy} on:click={generateDraft}>Generate draft</button>
           <button class="btn-secondary" disabled={busy} on:click={approveDraft}>Approve draft</button>
+          {#if setupStatus?.app_mode === 'live'}
+            <button class="btn-secondary" disabled={busy} on:click={exportToSling}>Export to Sling</button>
+          {/if}
         </div>
+        {#if exportMessage}
+          <div class="export-message" class:export-error={exportResult?.errors?.length > 0 || !exportResult}>
+            {exportMessage}
+          </div>
+        {/if}
       </div>
 
       <div class="content">
@@ -1254,5 +1435,155 @@
     font-size: 0.82rem;
     background: #fff;
     min-width: 220px;
+  }
+
+  /* Setup wizard */
+
+  .setup-card {
+    background: #fff;
+    border: 1px solid #dde2e8;
+    border-radius: 12px;
+    padding: 40px;
+    max-width: 480px;
+    width: 100%;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.08);
+  }
+
+  .setup-header {
+    margin-bottom: 28px;
+    text-align: center;
+  }
+
+  .setup-error {
+    background: #fee2e2;
+    color: #991b1b;
+    border: 1px solid #fca5a5;
+    border-radius: 6px;
+    padding: 10px 14px;
+    font-size: 0.85rem;
+    margin-bottom: 18px;
+  }
+
+  .setup-choices {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .setup-choice-btn {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+    padding: 16px 20px;
+    border-radius: 8px;
+    border: 2px solid transparent;
+    cursor: pointer;
+    font: inherit;
+    text-align: left;
+    transition: background 0.15s, border-color 0.15s;
+  }
+
+  .setup-choice-btn strong {
+    font-size: 0.95rem;
+    font-weight: 600;
+  }
+
+  .setup-choice-btn span {
+    font-size: 0.82rem;
+    opacity: 0.8;
+  }
+
+  .setup-choice-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .setup-choice-primary {
+    background: #2c6fa8;
+    color: #fff;
+    border-color: #2c6fa8;
+  }
+
+  .setup-choice-primary:hover:not(:disabled) {
+    background: #255d8e;
+    border-color: #255d8e;
+  }
+
+  .setup-choice-secondary {
+    background: #f0f2f5;
+    color: #1a2530;
+    border-color: #dde2e8;
+  }
+
+  .setup-choice-secondary:hover:not(:disabled) {
+    background: #e5e9ef;
+    border-color: #c5ccd4;
+  }
+
+  .setup-form {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .setup-label {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    font-size: 0.85rem;
+    font-weight: 500;
+    color: #3a4a5a;
+  }
+
+  .setup-label input {
+    padding: 8px 12px;
+    border: 1px solid #ccd2d8;
+    border-radius: 6px;
+    font: inherit;
+    font-size: 0.88rem;
+    background: #fff;
+    color: #1a2530;
+  }
+
+  .setup-label input:disabled {
+    background: #f5f7f9;
+  }
+
+  .setup-date-row {
+    display: flex;
+    gap: 12px;
+  }
+
+  .setup-date-row .setup-label {
+    flex: 1;
+  }
+
+  .setup-form-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 4px;
+  }
+
+  .setup-import-result {
+    background: #d1fae5;
+    border: 1px solid #6ee7b7;
+    border-radius: 6px;
+    padding: 12px 16px;
+    font-size: 0.85rem;
+    color: #065f46;
+  }
+
+  .setup-import-result strong {
+    display: block;
+    margin-bottom: 6px;
+  }
+
+  .setup-import-result ul {
+    padding-left: 16px;
+  }
+
+  .setup-import-result li {
+    margin-bottom: 2px;
   }
 </style>

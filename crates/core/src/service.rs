@@ -1,16 +1,19 @@
 use std::{env, path::PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{Datelike, NaiveDate, Utc};
 use rusqlite::{params, OptionalExtension};
 use serde_json::json;
 
+use lifebot_sling::{mapping, SlingShiftCreate, SlingShiftRef, SlingShiftUser};
+
 use crate::{
     db::LifebotDb,
+    import,
     models::{
         AssistantResponse, CertificationExpiryView, DashboardData, DecisionTraceDetail,
-        DecisionTraceSummary, GuardCertificationStatus, GuardProfile, IntegrationStatus,
-        PolicyViolationView, ShiftAssignmentView, ShiftQueueEntry,
+        DecisionTraceSummary, GuardCertificationStatus, GuardProfile, ImportRunResult,
+        IntegrationStatus, PolicyViolationView, SetupStatus, ShiftAssignmentView, ShiftQueueEntry,
     },
     scheduling::generate_next_cycle_draft,
     seed::seed_demo,
@@ -30,7 +33,7 @@ impl LifebotService {
             .map(PathBuf::from)
             .unwrap_or_else(|_| base_dir.join("lifebot-demo.db"));
         let demo_mode = env::var("LIFEBOT_DEMO_MODE").unwrap_or_else(|_| "true".into()) == "true";
-        let admin_mode = env::var("LIFEBOT_ADMIN_MODE").unwrap_or_else(|_| "true".into()) == "true";
+        let admin_mode = env::var("LIFEBOT_ADMIN_MODE").unwrap_or_else(|_| "false".into()) == "true";
         Self {
             db: LifebotDb::new(db_path),
             demo_mode,
@@ -41,7 +44,15 @@ impl LifebotService {
     pub fn init(&self) -> Result<()> {
         self.db.migrate()?;
         let conn = self.db.connect()?;
-        if self.demo_mode {
+        // Check app_mode from app_settings; fall back to "demo" for backward compatibility.
+        let app_mode: String = conn
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = 'app_mode'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or_else(|_| "demo".to_string());
+        if app_mode == "demo" {
             seed_demo(&conn)?;
             crate::sentinel::seed_sentinel_demo(&conn)?;
         }
@@ -485,6 +496,11 @@ impl LifebotService {
         })
     }
 
+    /// Returns true if this integration key holds a credential (should use keyring).
+    fn is_credential_key(key: &str) -> bool {
+        key.contains("api_key") || key.contains("token") || key.contains("secret") || key.contains("password")
+    }
+
     pub fn get_integrations(&self) -> Result<Vec<IntegrationStatus>> {
         let conn = self.db.connect()?;
         let integrations = vec![
@@ -495,13 +511,18 @@ impl LifebotService {
         ];
         let mut result = Vec::new();
         for (key, label, description) in integrations {
-            let value: String = conn
-                .query_row(
+            let value: String = if Self::is_credential_key(key) {
+                keyring::Entry::new("lifebot", &format!("integration-{}", key))
+                    .and_then(|e| e.get_password())
+                    .unwrap_or_default()
+            } else {
+                conn.query_row(
                     "SELECT value FROM app_settings WHERE key = ?1",
                     params![key],
                     |row| row.get(0),
                 )
-                .unwrap_or_default();
+                .unwrap_or_default()
+            };
             result.push(IntegrationStatus {
                 key: key.into(),
                 label: label.into(),
@@ -518,19 +539,31 @@ impl LifebotService {
         if !allowed.contains(&key) {
             anyhow::bail!("Unknown integration key: {}", key);
         }
-        let conn = self.db.connect()?;
-        conn.execute(
-            "INSERT INTO app_settings (key, value) VALUES (?1, ?2)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params![key, value],
-        )?;
+        if Self::is_credential_key(key) {
+            keyring::Entry::new("lifebot", &format!("integration-{}", key))
+                .and_then(|e| e.set_password(value))
+                .map_err(|e| anyhow::anyhow!("Keyring error: {}", e))?;
+        } else {
+            let conn = self.db.connect()?;
+            conn.execute(
+                "INSERT INTO app_settings (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![key, value],
+            )?;
+        }
         self.log_message("in_app", &format!("Integration '{}' updated.", key))?;
         Ok(())
     }
 
     pub fn disconnect_integration(&self, key: &str) -> Result<()> {
-        let conn = self.db.connect()?;
-        conn.execute("DELETE FROM app_settings WHERE key = ?1", params![key])?;
+        if Self::is_credential_key(key) {
+            if let Ok(entry) = keyring::Entry::new("lifebot", &format!("integration-{}", key)) {
+                let _ = entry.delete_credential();
+            }
+        } else {
+            let conn = self.db.connect()?;
+            conn.execute("DELETE FROM app_settings WHERE key = ?1", params![key])?;
+        }
         self.log_message("in_app", &format!("Integration '{}' disconnected.", key))?;
         Ok(())
     }
@@ -647,6 +680,225 @@ impl LifebotService {
         let conn = self.db.connect()?;
         let site_id: String = conn.query_row("SELECT site_id FROM pools WHERE id = ?1", params![pool_id], |r| r.get(0))?;
         crate::sentinel::find_current_supervisors(&conn, &site_id)
+    }
+
+    // -----------------------------------------------------------------------
+    // Sling connect, import, and cycle management
+    // -----------------------------------------------------------------------
+
+    /// Public accessor for the DB so Tauri commands can read stored credentials.
+    pub fn db(&self) -> &LifebotDb {
+        &self.db
+    }
+
+    /// Query app_settings and DB counts to build a SetupStatus snapshot.
+    pub fn setup_status(&self) -> Result<SetupStatus> {
+        let conn = self.db.connect()?;
+
+        let app_mode: String = conn
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = 'app_mode'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or_else(|_| "uninitialized".to_string());
+
+        let last_import: Option<String> = conn
+            .query_row(
+                "SELECT completed_at FROM import_runs ORDER BY completed_at DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        let guard_count = count(&conn, "SELECT COUNT(*) FROM guards")?;
+        let site_count = count(&conn, "SELECT COUNT(*) FROM sites")?;
+        let template_count = count(&conn, "SELECT COUNT(*) FROM shift_templates")?;
+
+        Ok(SetupStatus {
+            app_mode,
+            sling_connected: self.get_sling_token().is_ok(),
+            last_import,
+            guard_count,
+            site_count,
+            template_count,
+        })
+    }
+
+    /// Set app_mode in app_settings. If mode == "demo", seed demo data.
+    pub fn init_app_mode(&self, mode: &str) -> Result<()> {
+        let conn = self.db.connect()?;
+        conn.execute(
+            "INSERT INTO app_settings (key, value, updated_at) VALUES ('app_mode', ?1, datetime('now'))
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')",
+            params![mode],
+        )?;
+        if mode == "demo" {
+            seed_demo(&conn)?;
+            crate::sentinel::seed_sentinel_demo(&conn)?;
+        }
+        Ok(())
+    }
+
+    /// Store Sling session credentials securely and set app_mode to "live".
+    /// The token is stored in the OS keychain (macOS Keychain, Windows
+    /// Credential Manager, Linux Secret Service). Only the org_id and
+    /// connection status go into SQLite.
+    pub fn store_sling_session(&self, token: &str, org_id: i64) -> Result<()> {
+        // Store token in OS keychain — never in the database
+        let entry = keyring::Entry::new("lifebot", "sling-token")
+            .context("Failed to access OS keychain")?;
+        entry
+            .set_password(token)
+            .context("Failed to store Sling token in OS keychain")?;
+
+        // Store non-secret metadata in DB
+        let conn = self.db.connect()?;
+        conn.execute(
+            "INSERT INTO app_settings (key, value, updated_at) VALUES ('sling_org_id', ?1, datetime('now'))
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')",
+            params![org_id.to_string()],
+        )?;
+        conn.execute(
+            "INSERT INTO app_settings (key, value, updated_at) VALUES ('sling_connected', 'true', datetime('now'))
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO app_settings (key, value, updated_at) VALUES ('app_mode', 'live', datetime('now'))
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')",
+            [],
+        )?;
+        Ok(())
+    }
+
+    /// Retrieve the Sling token from the OS keychain.
+    pub fn get_sling_token(&self) -> Result<String> {
+        let entry = keyring::Entry::new("lifebot", "sling-token")
+            .context("Failed to access OS keychain")?;
+        entry
+            .get_password()
+            .context("No Sling token found in OS keychain — please reconnect")
+    }
+
+    /// Map Sling API data through the mapping layer, upsert into the DB, and
+    /// record an import run. Returns a summary of what was imported.
+    pub fn run_import(
+        &self,
+        users: Vec<lifebot_sling::SlingUser>,
+        groups: Vec<lifebot_sling::SlingGroup>,
+        shifts: Vec<lifebot_sling::SlingShift>,
+        cycle_id: &str,
+    ) -> Result<ImportRunResult> {
+        let conn = self.db.connect()?;
+
+        // Map users → guards.
+        let guard_imports: Vec<_> = users.iter().map(mapping::map_user_to_guard).collect();
+        let (guards_imported, guards_updated) = import::upsert_guards(&conn, &guard_imports)?;
+
+        // Split groups into locations and positions.
+        let (locations, positions) = mapping::split_groups(&groups);
+        let location_pairs: Vec<(i64, String)> = locations
+            .iter()
+            .map(|g| (g.id, g.name.clone()))
+            .collect();
+        let position_pairs: Vec<(i64, String)> = positions
+            .iter()
+            .map(|g| (g.id, g.name.clone()))
+            .collect();
+
+        let (sites_imported, _) = import::upsert_sites(&conn, &location_pairs)?;
+        let (positions_imported, _) = import::upsert_roles(&conn, &position_pairs)?;
+
+        // Map shifts, filtering out any that could not be parsed.
+        let shift_imports: Vec<_> = shifts.iter().filter_map(mapping::map_shift).collect();
+        let shifts_imported = import::import_shifts(&conn, &shift_imports, cycle_id)?;
+
+        // Record the import run.
+        import::record_import_run(
+            &conn,
+            guards_imported,
+            guards_updated,
+            sites_imported,
+            positions_imported,
+            shifts_imported,
+            &[],
+        )?;
+
+        Ok(ImportRunResult {
+            guards_imported,
+            guards_updated,
+            sites_imported,
+            positions_imported,
+            shifts_imported,
+            errors: vec![],
+        })
+    }
+
+    /// Insert a scheduling cycle in "draft" status.  Returns the new cycle id.
+    pub fn create_cycle(
+        &self,
+        name: &str,
+        starts_on: &str,
+        ends_on: &str,
+        rollover_deadline: &str,
+    ) -> Result<String> {
+        let id = format!("cycle-{}", starts_on);
+        let conn = self.db.connect()?;
+        conn.execute(
+            "INSERT INTO scheduling_cycles (id, name, starts_on, ends_on, rollover_deadline, status)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'draft')",
+            params![id, name, starts_on, ends_on, rollover_deadline],
+        )?;
+        Ok(id)
+    }
+
+    /// Build a list of Sling shift payloads for all reviewed/accepted assignments
+    /// in the given cycle, ready to push to the Sling API.
+    pub fn build_sling_export(&self, cycle_id: &str) -> Result<Vec<SlingShiftCreate>> {
+        let conn = self.db.connect()?;
+        let mut stmt = conn.prepare(
+            "SELECT
+                sh.shift_date,
+                st.start_time,
+                st.end_time,
+                st.name,
+                g.sling_id,
+                si.sling_id,
+                r.sling_id
+             FROM shift_assignments sa
+             JOIN shifts sh ON sh.id = sa.shift_id
+             JOIN shift_templates st ON st.id = sh.template_id
+             JOIN guards g ON g.id = sa.guard_id
+             LEFT JOIN sites si ON si.id = st.site_id
+             LEFT JOIN roles r ON r.id = st.role_id
+             WHERE sh.cycle_id = ?1
+               AND sa.status IN ('reviewed', 'accepted')"
+        )?;
+        let rows = stmt.query_map(params![cycle_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,   // shift_date
+                row.get::<_, String>(1)?,   // start_time
+                row.get::<_, String>(2)?,   // end_time
+                row.get::<_, String>(3)?,   // template name (summary)
+                row.get::<_, Option<i64>>(4)?, // guard sling_id
+                row.get::<_, Option<i64>>(5)?, // site sling_id
+                row.get::<_, Option<i64>>(6)?, // role sling_id
+            ))
+        })?;
+        let mut result = Vec::new();
+        for row in rows {
+            let (shift_date, start_time, end_time, name, guard_sling_id, site_sling_id, role_sling_id) = row?;
+            result.push(SlingShiftCreate {
+                dtstart: format!("{}T{}:00Z", shift_date, start_time),
+                dtend: format!("{}T{}:00Z", shift_date, end_time),
+                user: guard_sling_id.map(|id| SlingShiftUser { id }),
+                location: site_sling_id.map(|id| SlingShiftRef { id }),
+                position: role_sling_id.map(|id| SlingShiftRef { id }),
+                summary: Some(name),
+            });
+        }
+        Ok(result)
     }
 
     pub fn log_message(&self, provider: &str, body: &str) -> Result<()> {
